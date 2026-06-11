@@ -453,7 +453,7 @@ torch::Tensor MooncakeEpBuffer::get_next_combine_buffer(
          num_msg_elems, 1},
         torch::TensorOptions()
             .dtype(torch::kBFloat16)
-            .device(torch::Device(kDeviceType, device_id)));
+            .device(torch::Device(torch::kCUDA, device_id)));
 }
 
 void MooncakeEpBuffer::update_local_qpns() {
