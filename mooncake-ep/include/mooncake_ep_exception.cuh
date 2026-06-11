@@ -21,10 +21,15 @@ class EPException : public std::exception {
     const char* what() const noexcept override { return message.c_str(); }
 };
 
-// EP_CHECK is defined in mooncake_ep_device.h (unified CUDA/MUSA).
-// CUDA_CHECK is kept as an alias for backward compatibility.
 #ifndef CUDA_CHECK
-#define CUDA_CHECK(cmd) EP_CHECK(cmd)
+#define CUDA_CHECK(cmd)                                   \
+    do {                                                  \
+        cudaError_t e = (cmd);                            \
+        if (e != cudaSuccess) {                           \
+            throw EPException("CUDA", __FILE__, __LINE__, \
+                              cudaGetErrorString(e));     \
+        }                                                 \
+    } while (0)
 #endif
 
 #ifndef EP_HOST_ASSERT
@@ -37,15 +42,6 @@ class EPException : public std::exception {
 #endif
 
 #ifndef EP_DEVICE_ASSERT
-#ifdef MOONCAKE_EP_USE_MUSA
-// MUSA SDK 4.3.x can turn kernels that merely contain a device-side __trap()
-// branch into illegal memory accesses, even when the assertion condition is
-// true.  Keep these invariants as host/static checks on MUSA builds.
-#define EP_DEVICE_ASSERT(cond) \
-    do {                       \
-        (void)sizeof(cond);    \
-    } while (0)
-#else
 #define EP_DEVICE_ASSERT(cond)                                           \
     do {                                                                 \
         if (not(cond)) {                                                 \
@@ -54,5 +50,4 @@ class EPException : public std::exception {
             __trap();                                                    \
         }                                                                \
     } while (0)
-#endif
 #endif

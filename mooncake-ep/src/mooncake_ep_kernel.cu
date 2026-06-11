@@ -446,7 +446,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, timeout_ticks, \
               LOW_LATENCY_SEND_PHASE); \
-EP_DEVICE_SYNCHRONIZE(); \
+cudaDeviceSynchronize(); \
 } \
 if (phases & LOW_LATENCY_RECV_PHASE) { \
 LAUNCH_KERNEL(&cfg, dispatch_func, \
@@ -465,7 +465,7 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_tokens, num_max_dispatch_tokens_per_rank, \
               num_topk, num_experts, rank, num_ranks, timeout_ticks, \
               LOW_LATENCY_RECV_PHASE); \
-EP_DEVICE_SYNCHRONIZE(); \
+cudaDeviceSynchronize(); \
 } \
 } break
 
@@ -750,7 +750,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               timeout_ticks, LOW_LATENCY_SEND_PHASE, zero_copy); \
-EP_DEVICE_SYNCHRONIZE(); \
+cudaDeviceSynchronize(); \
 } \
 if (phases & LOW_LATENCY_RECV_PHASE) { \
 LAUNCH_KERNEL(&cfg, combine_func, \
@@ -768,7 +768,7 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               num_max_dispatch_tokens_per_rank, \
               num_experts, rank, num_ranks, \
               timeout_ticks, LOW_LATENCY_RECV_PHASE, zero_copy); \
-EP_DEVICE_SYNCHRONIZE(); \
+cudaDeviceSynchronize(); \
 } \
 } break
 

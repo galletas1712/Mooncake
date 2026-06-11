@@ -1,39 +1,16 @@
 #pragma once
 // ============================================================================
-// mooncake_ep_device.h - Unified CUDA/MUSA compatibility header
+// mooncake_ep_device.h - Minimal platform-specific definitions
 // ============================================================================
-// Device-compatible types and macros only (no ATen / libtorch).
-// ATen type aliases (DeviceStream, kDeviceType, etc.) are in
-// mooncake_ep_event.h.
+// Only contains items that torchada's source-to-source translation cannot
+// handle.  Everything else uses plain CUDA API names — torchada maps them
+// to MUSA equivalents at build time via SimplePorting text replacement.
 // ============================================================================
-
-// NOTE: mooncake_ep_exception.cuh is NOT included here; it is always
-// included by the translation unit before this header (via kernel .cu or
-// mooncake_ep_buffer.h).  Including it here would cause EPException
-// redefinition when torchada's simple_porting creates include_musa/ copies
-// with .muh extensions.
 
 #ifdef MOONCAKE_EP_USE_MUSA
 
-// ---- MUSA platform --------------------------------------------------------
-#include "cuda_alike.h"       // cuda* to musa* runtime API mapping
-#include <musa_bf16.h>        // mt_bfloat16
-#include <musa_fp8.h>         // __mt_fp8_* storage and conversion helpers
-#include <musa_runtime.h>     // musaStream_t, musaError_t, etc.
-
-// -- Stream type alias (musaStream_t to cudaStream_t) ------------------------
-typedef musaStream_t cudaStream_t;
-
-// -- bfloat16 -----------------------------------------------------------------
-#ifdef __MUSA_ARCH__
-using nv_bfloat16 = mt_bfloat16;
-#elif defined(__MUSA__)
-using nv_bfloat16 = mt_bfloat16;
-#else
-struct nv_bfloat16 { unsigned short __x; };
-#endif
-
-// -- FP8 ----------------------------------------------------------------------
+// -- FP8 types (MUSA uses different names; not in torchada mapping) ----------
+#include <musa_fp8.h>
 using ep_fp8_storage_t = __mt_fp8_storage_t;
 using ep_fp8x2_storage_t = __mt_fp8x2_storage_t;
 #if defined(__CUDACC__) || defined(__MCC__)
@@ -42,7 +19,7 @@ __device__ __forceinline__ ep_fp8x2_storage_t ep_cvt_float2_to_fp8x2(float2 x) {
 }
 #endif
 
-// -- Device intrinsics -------------------------------------------------------
+// -- Device intrinsics (MUSA doesn't have __ldg / __activemask) --------------
 #ifndef __ldg
 #define __ldg(ptr) (*(ptr))
 #endif
@@ -54,10 +31,9 @@ __device__ __forceinline__ ep_fp8x2_storage_t ep_cvt_float2_to_fp8x2(float2 x) {
 __forceinline__ __device__ int get_lane_id() { return threadIdx.x % 32; }
 #endif
 
-// -- Kernel launch bounds (MUSA doesn't support __launch_bounds__) -----------
+// -- Kernel launch (MUSA: no __launch_bounds__, no cooperative launch) --------
 #define EP_LAUNCH_BOUNDS(max_threads, min_blocks)
 
-// -- Launch config (MUSA: no cooperative launch) -----------------------------
 #define SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream) \
     dim3 _grid(num_sms);                                  \
     dim3 _block(num_threads);                             \
@@ -66,35 +42,17 @@ __forceinline__ __device__ int get_lane_id() { return threadIdx.x % 32; }
 #define LAUNCH_KERNEL(config, kernel, ...)                             \
     kernel<<<_grid, _block, 0, _stream>>>(__VA_ARGS__);               \
     {                                                                  \
-        auto _err = musaGetLastError();                                \
-        if (_err != musaSuccess) {                                     \
+        auto _err = cudaGetLastError();                                \
+        if (_err != cudaSuccess) {                                     \
             fprintf(stderr, "[EP] kernel launch failed: %s\n",         \
-                    musaGetErrorString(_err));                         \
+                    cudaGetErrorString(_err));                         \
         }                                                              \
     }
 
-// -- Unified error checking (cuda_alike.h maps cudaError_t/cudaGetErrorString/cudaSuccess) --
-#define EP_CHECK(cmd)                                              \
-    do {                                                           \
-        cudaError_t e = (cmd);                                     \
-        if (e != cudaSuccess) {                                    \
-            throw EPException("GPU", __FILE__, __LINE__,           \
-                              cudaGetErrorString(e));              \
-        }                                                          \
-    } while (0)
-
-// -- Unified device synchronization (gpu_vendor/musa.h maps cudaDeviceSynchronize) --
-#define EP_DEVICE_SYNCHRONIZE()  cudaDeviceSynchronize()
-
 #else  // !MOONCAKE_EP_USE_MUSA
 
-// ---- CUDA platform ---------------------------------------------------------
-#include <cuda_bf16.h>
+// -- FP8 types (CUDA native names) -------------------------------------------
 #include <cuda_fp8.h>
-#include <cuda_runtime.h>
-#include <infiniband/mlx5dv.h>
-
-// -- FP8 ----------------------------------------------------------------------
 using ep_fp8_storage_t = __nv_fp8_storage_t;
 using ep_fp8x2_storage_t = __nv_fp8x2_storage_t;
 #if defined(__CUDACC__) || defined(__MCC__)
@@ -112,11 +70,10 @@ __forceinline__ __device__ int get_lane_id() {
 }
 #endif
 
-// -- Kernel launch bounds ----------------------------------------------------
+// -- Kernel launch (CUDA: cooperative launch) --------------------------------
 #define EP_LAUNCH_BOUNDS(max_threads, min_blocks) \
     __launch_bounds__(max_threads, min_blocks)
 
-// -- Launch config (CUDA: cooperative launch) --------------------------------
 #define SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream) \
     cudaLaunchConfig_t cfg = {                            \
         (num_sms), (num_threads), 0, stream, nullptr, 0}; \
@@ -127,19 +84,9 @@ __forceinline__ __device__ int get_lane_id() {
     cfg.numAttrs = 1
 
 #define LAUNCH_KERNEL(config, kernel, ...) \
-    EP_CHECK(cudaLaunchKernelEx(config, kernel, ##__VA_ARGS__))
-
-// -- Unified error checking (native CUDA names) ------------------------------
-#define EP_CHECK(cmd)                                              \
-    do {                                                           \
-        cudaError_t e = (cmd);                                     \
-        if (e != cudaSuccess) {                                    \
-            throw EPException("GPU", __FILE__, __LINE__,           \
-                              cudaGetErrorString(e));              \
-        }                                                          \
-    } while (0)
-
-// -- Unified device synchronization ------------------------------------------
-#define EP_DEVICE_SYNCHRONIZE()  cudaDeviceSynchronize()
+    CUDA_CHECK(cudaLaunchKernelEx(config, kernel, ##__VA_ARGS__))
 
 #endif  // MOONCAKE_EP_USE_MUSA
+
+// Both platforms need IB verbs
+#include <infiniband/mlx5dv.h>

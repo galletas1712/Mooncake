@@ -1,6 +1,6 @@
 #pragma once
 
-#include <mooncake_ep_device.h>
+#include <cuda_runtime.h>
 
 namespace mooncake {
 
@@ -31,12 +31,5 @@ void combine(void* combined_x, int32_t* active_ranks, void* mxa_buffer,
              int num_experts, int rank, int num_ranks, void* workspace,
              cudaStream_t stream, int64_t timeout_ticks, int phases,
              bool zero_copy);
-
-void mark_phase_ack(void* mxa_buffer, const int32_t* nvlink_available,
-                    void* const* ipc_peer_ptrs, int* ack_buffer, int rank,
-                    int num_ranks, int epoch, cudaStream_t stream);
-
-void wait_phase_ack(int* ack_buffer, int rank, int num_ranks, int epoch,
-                    cudaStream_t stream, int64_t timeout_ticks);
 
 }  // namespace mooncake

@@ -1,7 +1,10 @@
 #ifndef MOONCAKE_EP_BUFFER_H
 #define MOONCAKE_EP_BUFFER_H
 
-#include <mooncake_ep_device.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_bf16.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include <memory>
 #include <mooncake_ep_api.cuh>
 #include <mooncake_ep_configs.cuh>
@@ -68,12 +71,11 @@ struct MooncakeEpBuffer {
 
     // GDR buffer — owned by p2p_transport_
     int buffer_idx{};
-    int phase_epochs[2]{};
     int64_t num_ep_buffer_bytes;
     void* gdr_buffer = nullptr;
 
     // Device transports — own all platform-specific state.
-    // p2p_transport_: NVLink (CUDA) or MTLink (MUSA) intra-node P2P.
+    // p2p_transport_: NVLink intra-node P2P.
     // rdma_transport_: IBGDA inter-node RDMA.  nullptr when IBGDA unavailable.
     device::P2pTransport* p2p_transport_ = nullptr;
     device::RdmaTransport* rdma_transport_ = nullptr;
@@ -175,7 +177,7 @@ struct MooncakeEpBuffer {
         return rdma_transport_->localMetadata().lids;
     }
 
-    // IPC handle for P2P (NVLink / MTLink).
+    // IPC handle for P2P (NVLink).
     std::vector<int32_t> get_ipc_handle();
 
     void sync_nvlink_ipc_handles(

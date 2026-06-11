@@ -39,4 +39,7 @@
 #undef __CUDA_NO_BFLOAT162_OPERATORS__
 #endif
 
-#include <mooncake_ep_device.h>
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
+#include <infiniband/mlx5dv.h>
