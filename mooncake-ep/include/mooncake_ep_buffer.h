@@ -42,7 +42,7 @@ struct BufferPair {
         size_t signaling_buffer_bytes = num_experts * sizeof(int);
         size_t send_recv_buffer_bytes =
             num_experts * num_max_dispatch_tokens_per_rank *
-            (2 * sizeof(int4) + hidden * 2 /*sizeof(nv_bfloat16)*/);
+            (2 * sizeof(int4) + hidden * sizeof(EP_BFLOAT16));
         for (int i = 0; i < 2; ++i) {
             size_t rdma_base_offset = total_bytes +
                                       2 * i * signaling_buffer_bytes +

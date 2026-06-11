@@ -43,3 +43,12 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <infiniband/mlx5dv.h>
+
+// torchada maps nv_bfloat16 → __mt_bfloat16 which is an incomplete type on
+// MUSA, so sizeof(__mt_bfloat16) fails.  Use mt_bfloat16 (the complete MUSA
+// bfloat16 type) via EP_BFLOAT16 so sizeof() works on both platforms.
+#ifdef MOONCAKE_EP_USE_MUSA
+#define EP_BFLOAT16 mt_bfloat16
+#else
+#define EP_BFLOAT16 nv_bfloat16
+#endif
