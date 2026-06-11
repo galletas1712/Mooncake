@@ -39,7 +39,6 @@ MooncakeEpBuffer::MooncakeEpBuffer(int rank, int num_ranks,
       num_ep_buffer_bytes(num_ep_buffer_bytes),
       comm_stream(at::cuda::getStreamFromPool(true)) {
     USE_QP_COUNT = MAX_QP_COUNT / num_ranks * num_ranks;
-
     // Get ranks
     CUDA_CHECK(cudaGetDevice(&device_id));
     CUDA_CHECK(cudaDeviceGetAttribute(&clock_rate_khz, cudaDevAttrClockRate,
@@ -220,7 +219,7 @@ MooncakeEpBuffer::dispatch(const torch::Tensor& x,
         mooncake::mark_phase_ack(gdr_buffer, nvlink_avail, ipc_ptrs,
                                  buffer.rdma_send_signal_buffer, rank,
                                  num_ranks, phase_epoch,
-                                 launch_stream.stream());
+                                 launch_stream);
 #endif
     };
 
@@ -228,7 +227,7 @@ MooncakeEpBuffer::dispatch(const torch::Tensor& x,
 #ifdef MOONCAKE_EP_USE_MUSA
         mooncake::wait_phase_ack(buffer.rdma_send_signal_buffer, rank,
                                  num_ranks, phase_epoch,
-                                 launch_stream.stream(), timeout_ticks);
+                                 launch_stream, timeout_ticks);
 #endif
     };
 
@@ -245,7 +244,7 @@ MooncakeEpBuffer::dispatch(const torch::Tensor& x,
             topk_idx.data_ptr<int64_t>(), next_buffer.rdma_recv_signal_buffer,
             num_tokens, hidden, num_max_dispatch_tokens_per_rank, num_topk,
             num_experts, rank, num_ranks, use_fp8, workspace,
-            launch_stream.stream(), timeout_ticks, phases);
+            launch_stream, timeout_ticks, phases);
     };
     if (return_recv_hook) {
         launcher(LOW_LATENCY_SEND_PHASE);
@@ -370,7 +369,7 @@ MooncakeEpBuffer::combine(const torch::Tensor& x, const torch::Tensor& topk_idx,
         mooncake::mark_phase_ack(gdr_buffer, nvlink_avail, ipc_ptrs,
                                  buffer.rdma_send_signal_buffer, rank,
                                  num_ranks, phase_epoch,
-                                 launch_stream.stream());
+                                 launch_stream);
 #endif
     };
 
@@ -378,7 +377,7 @@ MooncakeEpBuffer::combine(const torch::Tensor& x, const torch::Tensor& topk_idx,
 #ifdef MOONCAKE_EP_USE_MUSA
         mooncake::wait_phase_ack(buffer.rdma_send_signal_buffer, rank,
                                  num_ranks, phase_epoch,
-                                 launch_stream.stream(), timeout_ticks);
+                                 launch_stream, timeout_ticks);
 #endif
     };
 
@@ -394,7 +393,7 @@ MooncakeEpBuffer::combine(const torch::Tensor& x, const torch::Tensor& topk_idx,
             layout_range.data_ptr<int64_t>(),
             next_buffer.rdma_recv_signal_buffer, num_combined_tokens, hidden,
             num_max_dispatch_tokens_per_rank, num_topk, num_experts, rank,
-            num_ranks, workspace, launch_stream.stream(), timeout_ticks, phases,
+            num_ranks, workspace, launch_stream, timeout_ticks, phases,
             zero_copy);
     };
     if (return_recv_hook) {
@@ -438,6 +437,7 @@ torch::Tensor MooncakeEpBuffer::get_next_combine_buffer(
     int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
     BufferPair layout(gdr_buffer, num_max_dispatch_tokens_per_rank, hidden,
                       num_ranks, num_experts);
+
     auto buffer = layout.buffers[buffer_idx];
     auto dtype = torch::kBFloat16;
     size_t num_bytes_per_combine_msg = hidden * 2 /*sizeof(nv_bfloat16)*/;
@@ -451,9 +451,7 @@ torch::Tensor MooncakeEpBuffer::get_next_combine_buffer(
          hidden},
         {num_ranks * num_max_dispatch_tokens_per_rank * num_msg_elems,
          num_msg_elems, 1},
-        torch::TensorOptions()
-            .dtype(torch::kBFloat16)
-            .device(torch::Device(torch::kCUDA, device_id)));
+        torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
 }
 
 void MooncakeEpBuffer::update_local_qpns() {

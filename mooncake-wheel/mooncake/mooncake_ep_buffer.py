@@ -7,19 +7,6 @@ _USE_MUSA = os.getenv("MOONCAKE_EP_USE_MUSA", "").upper() in {"1", "ON", "TRUE",
 _DEVICE = "musa" if _USE_MUSA else "cuda"
 
 
-def _backend_active_ranks(group: dist.ProcessGroup) -> torch.Tensor:
-    try:
-        from mooncake.pg import get_active_ranks
-
-        return get_active_ranks(group)
-    except (ImportError, AttributeError, TypeError, RuntimeError):
-        return torch.ones(dist.get_world_size(group), dtype=torch.int32, device="cpu")
-
-
-def _backend_active_ranks_mask(group: dist.ProcessGroup) -> List[int]:
-    return _backend_active_ranks(group).to(device="cpu", dtype=torch.int32).tolist()
-
-
 class EventOverlap:
     """
     A wrapper class to manage CUDA events, also for better overlapping convenience.
@@ -79,8 +66,7 @@ class EventOverlap:
 
 
 class Buffer:
-    def __init__(self, group: dist.ProcessGroup, num_ep_buffer_bytes: int = 0,
-                 engine=None):
+    def __init__(self, group: dist.ProcessGroup, num_ep_buffer_bytes: int = 0):
         from mooncake import ep
 
         # Initialize the CPP runtime
@@ -90,16 +76,10 @@ class Buffer:
         self.num_ep_buffer_bytes = num_ep_buffer_bytes
         self.backend = self.group
         # NIC auto-detection happens inside ep.Buffer via Topology::discover().
-        # Set MOONCAKE_EP_DEVICE_FILTER=mlx5_1,mlx5_2 to restrict NIC selection.
-        # If engine is provided, pass the TransferEngine* so EP can get
-        # P2pTransport/RdmaTransport from it instead of creating its own.
-        if engine is not None:
-            engine_ptr = engine.get_engine_ptr()
-            self.runtime = ep.Buffer(self.rank, self.group_size,
-                                     num_ep_buffer_bytes, engine_ptr)
-        else:
-            self.runtime = ep.Buffer(self.rank, self.group_size,
-                                     num_ep_buffer_bytes)
+        self.runtime = ep.Buffer(
+            self.rank, self.group_size, num_ep_buffer_bytes
+        )
+        # Fallback flag and buffers.
         # Note: `sync_nvlink_ipc_handles()` can mutate C++ `ibgda_disabled_` (True->False when
         # P2P+IPC succeeds for all ranks). We re-evaluate after IPC sync below.
         self._use_fallback = bool(self.runtime.ibgda_disabled())
@@ -133,42 +113,36 @@ class Buffer:
             if is_update:
                 self.runtime.update_local_qpns()
 
-            # Exchange per-rank QPN slices via all_gather (gloo has no all_to_all)
             local_qpns = self.runtime.get_local_qpns()
-            local_qpns_flat = torch.tensor(
-                local_qpns, dtype=torch.int32, device=_DEVICE
+            local_qpns = list(
+                torch.unbind(
+                    torch.tensor(local_qpns, dtype=torch.int32, device=_DEVICE).view(
+                        -1, all_to_all_size
+                    )
+                )
             )
-            all_qpns_list = [
-                torch.empty_like(local_qpns_flat)
+            remote_qpns = [
+                torch.empty(all_to_all_size, dtype=torch.int32, device=_DEVICE)
                 for _ in range(self.group_size)
             ]
-            dist.all_gather(all_qpns_list, local_qpns_flat, self.group)
-            # all_qpns_list[r] = rank r's full QPN list
-            remote_qpns = []
-            for r in range(self.group_size):
-                qpns = all_qpns_list[r].tolist()
-                # Take the slice of rank r's QPs that target this rank
-                start = self.rank * all_to_all_size
-                remote_qpns.append(qpns[start:start + all_to_all_size])
+            dist.all_to_all(remote_qpns, local_qpns, self.group)
+            peer_qpns = [remote_qpns[r].tolist() for r in range(self.group_size)]
 
-            # Exchange per-rank LID slices via all_gather (gloo has no all_to_all)
             local_lids = self.runtime.get_local_lids()
-            local_lids_flat = torch.tensor(
-                local_lids, dtype=torch.int32, device=_DEVICE
+            local_lids = list(
+                torch.unbind(
+                    torch.tensor(local_lids, dtype=torch.int32, device=_DEVICE).view(
+                        -1, all_to_all_size
+                    )
+                )
             )
-            all_lids_list = [
-                torch.empty_like(local_lids_flat)
+            remote_lids = [
+                torch.empty(all_to_all_size, dtype=torch.int32, device=_DEVICE)
                 for _ in range(self.group_size)
             ]
-            dist.all_gather(all_lids_list, local_lids_flat, self.group)
-            remote_lids = []
-            for r in range(self.group_size):
-                lids = all_lids_list[r].tolist()
-                # Take the slice of rank r's LIDs that target this rank
-                start = self.rank * all_to_all_size
-                remote_lids.append(lids[start:start + all_to_all_size])
+            dist.all_to_all(remote_lids, local_lids, self.group)
+            peer_lids = [remote_lids[r].tolist() for r in range(self.group_size)]
 
-            # Exchange GIDs (needed for RoCE; harmless for IB)
             (subnet_prefix, interface_id) = self.runtime.get_gid()
             subnet_prefix_t = torch.tensor([subnet_prefix], dtype=torch.int64, device=_DEVICE)
             subnet_prefixes_list = [
@@ -186,44 +160,37 @@ class Buffer:
             dist.all_gather(interface_ids_list, interface_id_t, self.group)
             interface_ids = torch.cat(interface_ids_list).tolist()
 
-            active_ranks_mask = _backend_active_ranks_mask(self.backend)
+            from mooncake.ep import get_active_ranks
+            active_ranks_mask = get_active_ranks(self.backend).tolist()
             self.runtime.sync_ibgda_peers(
-                raddrs, rkeys, remote_qpns, remote_lids,
+                raddrs, rkeys, peer_qpns, peer_lids,
                 subnet_prefixes, interface_ids, active_ranks_mask
             )
 
-        # P2P/NVLink IPC handle exchange — skip entirely when disabled.
-        _disable_p2p = os.getenv("MOONCAKE_EP_DISABLE_P2P", "").upper() in {"1", "ON", "TRUE", "YES"}
-        force_fallback = False
-        if not _disable_p2p:
-            try:
-                local_handle_ints = self.runtime.get_ipc_handle()
-                # pybind11 converts std::vector<int32_t> to a list of integers
-                # Exchange through the active backend device; Mooncake PG does
-                # not reliably gather CPU tensors in the MUSA path.
-                local_handle_tensor = torch.tensor(
-                    local_handle_ints, dtype=torch.int32, device=_DEVICE
-                )
-                handles = [
-                    torch.empty(
-                        len(local_handle_ints), dtype=torch.int32, device=_DEVICE
-                    )
-                    for _ in range(self.group_size)
-                ]
-                dist.all_gather(handles, local_handle_tensor, self.group)
-                remote_handles = [h.cpu().tolist() for h in handles]
-                active_ranks_mask = _backend_active_ranks_mask(self.backend)
-                self.runtime.sync_nvlink_ipc_handles(remote_handles,
-                                                     active_ranks_mask)
-            except Exception as e:
-                import warnings
+        try:
+            local_handle_ints = self.runtime.get_ipc_handle()
+            # pybind11 converts std::vector<int32_t> to a list of integers
+            local_handle_tensor = torch.tensor(
+                local_handle_ints, dtype=torch.int32, device=_DEVICE
+            )
+            handles = [
+                torch.empty(len(local_handle_ints), dtype=torch.int32, device=_DEVICE)
+                for _ in range(self.group_size)
+            ]
+            dist.all_gather(handles, local_handle_tensor, self.group)
+            remote_handles = [h.tolist() for h in handles]
+            from mooncake.ep import get_active_ranks
+            active_ranks_mask = get_active_ranks(self.backend).tolist()
+            self.runtime.sync_nvlink_ipc_handles(remote_handles,
+                                                 active_ranks_mask)
+        except Exception as e:
+            import warnings
 
-                warnings.warn(
-                    f"[Rank {self.rank}] Failed to exchange IPC handles: {e}. Falling back.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                force_fallback = True
+            warnings.warn(
+                f"[Rank {self.rank}] Failed to exchange IPC handles: {e}. Falling back.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         use_fast_path = False
         try:
@@ -232,7 +199,7 @@ class Buffer:
             ibgda_disabled = bool(self.runtime.ibgda_disabled())
             use_fast_path = not ibgda_disabled
 
-        self._use_fallback = force_fallback or not use_fast_path
+        self._use_fallback = not use_fast_path
 
 
     def update_ep_member(self):
@@ -285,6 +252,8 @@ class Buffer:
             )
 
         if self._use_fallback:
+            from mooncake.ep import get_active_ranks
+
             (
                 packed_recv_x,
                 packed_recv_x_scales,
@@ -301,7 +270,7 @@ class Buffer:
                 use_fp8,
                 return_recv_hook,
             )
-            backend_active_ranks = _backend_active_ranks(self.backend).to(
+            backend_active_ranks = get_active_ranks(self.backend).to(
                 device=active_ranks.device, dtype=active_ranks.dtype
             )
             if active_ranks.numel() == backend_active_ranks.numel():
@@ -383,6 +352,8 @@ class Buffer:
             num_experts,
         ) = handle
         if self._use_fallback:
+            from mooncake.ep import get_active_ranks
+
             combined_x, event, hook = self._fallback_combine(
                 x,
                 topk_idx,
@@ -395,7 +366,7 @@ class Buffer:
                 return_recv_hook,
                 out,
             )
-            backend_active_ranks = _backend_active_ranks(self.backend).to(
+            backend_active_ranks = get_active_ranks(self.backend).to(
                 device=active_ranks.device, dtype=active_ranks.dtype
             )
             if active_ranks.numel() == backend_active_ranks.numel():
@@ -510,7 +481,8 @@ class Buffer:
             ]
             dist.all_gather(num_tokens_list, num_tokens_tensor, group=self.group)
             num_tokens_per_rank = [t.item() for t in num_tokens_list]
-            backend_active_ranks = _backend_active_ranks(self.backend).tolist()
+            from mooncake.ep import get_active_ranks
+            backend_active_ranks = get_active_ranks(self.backend).tolist()
             for i in range(num_ranks):
                 if backend_active_ranks[i] == 0:
                     num_tokens_per_rank[i] = 0
@@ -734,7 +706,8 @@ class Buffer:
             ]
             dist.all_gather(num_tokens_list, num_tokens_tensor, group=self.group)
             num_tokens_per_rank = [t.item() for t in num_tokens_list]
-            backend_active_ranks = _backend_active_ranks(self.backend).tolist()
+            from mooncake.ep import get_active_ranks
+            backend_active_ranks = get_active_ranks(self.backend).tolist()
             for i in range(num_ranks):
                 if backend_active_ranks[i] == 0:
                     num_tokens_per_rank[i] = 0

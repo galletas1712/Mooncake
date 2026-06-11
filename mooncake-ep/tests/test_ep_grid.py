@@ -186,8 +186,6 @@ def run_test_iteration(
 
 def worker(rank, world_size, config_dict):
     import torchada  # noqa: F401 — maps torch.cuda.* to torch.musa.* on MUSA
-    torch.cuda.set_device(rank)
-    torch.set_default_dtype(torch.bfloat16)
 
     # Device filter
     device_filter = [
@@ -197,6 +195,10 @@ def worker(rank, world_size, config_dict):
     ]
     if device_filter:
         pg.set_device_filter(device_filter)
+
+    torch.cuda.set_device(rank)
+    torch.set_default_dtype(torch.bfloat16)
+    torch.set_default_device("cuda")
 
     dist.init_process_group(backend="mooncake", rank=rank, world_size=world_size)
     group = dist.group.WORLD
@@ -212,13 +214,7 @@ def worker(rank, world_size, config_dict):
         traceback.print_exc()
         raise
 
-    if config_dict.get("fail_rank", -1) != -1:
-        # Survivor: skip destroy_process_group (would hang) and exit hard.
-        # The failed rank exits before participating in teardown.
-        os._exit(0)
-
-    if config_dict.get("fail_rank", -1) == -1:
-        dist.destroy_process_group()
+    os._exit(0)
 
 
 class TestMooncakeEPBuffer(unittest.TestCase):
@@ -293,10 +289,6 @@ def generate_tests():
 
         if raw_dict["async_finish"] and raw_dict["return_recv_hook"]:
             continue
-
-        # Mooncake PG backend has built-in fault tolerance (peer liveness
-        # probe, automatic failed-rank exclusion).  No need to skip fail_rank
-        # tests on MUSA.
 
         # Flatten
         config_dict = {}

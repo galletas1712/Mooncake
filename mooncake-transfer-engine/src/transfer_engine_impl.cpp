@@ -368,15 +368,6 @@ int TransferEngineImpl::init(const std::string& metadata_conn_string,
 }
 
 int TransferEngineImpl::freeEngine() {
-#if defined(USE_CUDA) || defined(USE_MUSA)
-    p2p_transport_.reset();
-    rdma_transport_.reset();
-#endif
-    multi_transports_.reset();
-    {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-        local_memory_regions_.clear();
-    }
     if (metadata_) {
         metadata_->removeRpcMetaEntry(local_server_name_);
         metadata_.reset();
