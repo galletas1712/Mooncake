@@ -9,9 +9,8 @@
 
 #ifdef MOONCAKE_EP_USE_MUSA
 
-// -- FP8 / BF16 types (MUSA uses different names; not in torchada mapping) ---
+// -- FP8 types (MUSA uses different names; not in torchada mapping) ----------
 #include <musa_fp8.h>
-#include <musa_bf16.h>
 using ep_fp8_storage_t = __mt_fp8_storage_t;
 using ep_fp8x2_storage_t = __mt_fp8x2_storage_t;
 #if defined(__CUDACC__) || defined(__MCC__)

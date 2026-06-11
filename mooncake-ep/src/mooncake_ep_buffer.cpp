@@ -440,7 +440,7 @@ torch::Tensor MooncakeEpBuffer::get_next_combine_buffer(
                       num_ranks, num_experts);
     auto buffer = layout.buffers[buffer_idx];
     auto dtype = torch::kBFloat16;
-    size_t num_bytes_per_combine_msg = hidden * sizeof(nv_bfloat16);
+    size_t num_bytes_per_combine_msg = hidden * 2 /*sizeof(nv_bfloat16)*/;
     auto num_msg_elems =
         static_cast<int>(num_bytes_per_combine_msg / elementSize(dtype));
 
