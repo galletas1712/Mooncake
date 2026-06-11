@@ -1,38 +1,21 @@
 #pragma once
 
-#ifdef MOONCAKE_EP_USE_MUSA
-#include <ATen/musa/MUSAContext.h>
-#else
 #include <ATen/cuda/CUDAContext.h>
-#endif
 #include <memory>
 #include <mooncake_ep_exception.cuh>
 #include <torch/torch.h>
 
 namespace mooncake {
 
-#ifdef MOONCAKE_EP_USE_MUSA
-using DeviceStream = at::musa::MUSAStream;
-constexpr torch::DeviceType kDeviceType = torch::kMUSA;
-#define EP_GET_CURRENT_STREAM()   at::musa::getCurrentMUSAStream()
-#define EP_GET_STREAM_FROM_POOL(hp) at::musa::getStreamFromPool(hp)
-#else
 using DeviceStream = at::cuda::CUDAStream;
 constexpr torch::DeviceType kDeviceType = torch::kCUDA;
-#define EP_GET_CURRENT_STREAM()   at::cuda::getCurrentCUDAStream()
-#define EP_GET_STREAM_FROM_POOL(hp) at::cuda::getStreamFromPool(hp)
-#endif
 
 struct EventHandle {
     std::shared_ptr<torch::Event> event;
 
     EventHandle() {
         event = std::make_shared<torch::Event>(kDeviceType);
-#ifdef MOONCAKE_EP_USE_MUSA
-        event->record(at::musa::getCurrentMUSAStream());
-#else
         event->record(at::cuda::getCurrentCUDAStream());
-#endif
     }
 
     explicit EventHandle(const DeviceStream& stream) {
@@ -43,11 +26,7 @@ struct EventHandle {
     EventHandle(const EventHandle& other) = default;
 
     void current_stream_wait() const {
-#ifdef MOONCAKE_EP_USE_MUSA
-        at::musa::getCurrentMUSAStream().unwrap().wait(*event);
-#else
         at::cuda::getCurrentCUDAStream().unwrap().wait(*event);
-#endif
     }
 };
 
