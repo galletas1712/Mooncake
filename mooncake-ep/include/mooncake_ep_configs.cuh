@@ -45,12 +45,12 @@
 #include <infiniband/mlx5dv.h>
 
 // torchada maps nv_bfloat16 → __mt_bfloat16 which is an incomplete type on
-// MUSA, so sizeof(__mt_bfloat16) fails.  Use mt_bfloat16 (the complete MUSA
-// bfloat16 type, defined in musa_bf16.hpp) via EP_BFLOAT16 so sizeof() works
-// on both platforms.
+// MUSA, so sizeof(__mt_bfloat16) fails.  mt_bfloat16 (the complete typedef in
+// musa_bf16.hpp) requires the MUSA device compiler (mcc) and cannot be
+// included from host .cpp files.  Use EP_BF16_SIZE: sizeof(nv_bfloat16) on
+// CUDA, hardcoded 2 on MUSA (both are 2 bytes).
 #ifdef MOONCAKE_EP_USE_MUSA
-#include <musa_bf16.hpp>
-#define EP_BFLOAT16 mt_bfloat16
+#define EP_BF16_SIZE 2
 #else
-#define EP_BFLOAT16 nv_bfloat16
+#define EP_BF16_SIZE sizeof(nv_bfloat16)
 #endif

@@ -112,13 +112,13 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
     constexpr int kNumPerChannels = 128;
     constexpr float kFP8Margin = 1e-4, kFP8Amax = 448, kFP8AmaxInv = 1.0f / 448.0f;
     const int num_scales = kHidden / kNumPerChannels;
-    const size_t hidden_bytes = kHidden * (kUseFP8 ? sizeof(ep_fp8_storage_t) : sizeof(EP_BFLOAT16));
+    const size_t hidden_bytes = kHidden * (kUseFP8 ? sizeof(ep_fp8_storage_t) : EP_BF16_SIZE);
     const size_t hidden_int4 = hidden_bytes / sizeof(int4);
 
     // Message package: hidden data, FP8 scales, index at source
     // NOTES: currently we have 3 reserved int fields for future use
     using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
-    const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(EP_BFLOAT16)));
+    const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * EP_BF16_SIZE));
     const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
     EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -141,7 +141,7 @@ dispatch(void* packed_recv_x, float* packed_recv_x_scales,
     // 1. The first-kind warps for FP8 cast and sending top-k tokens
     // 2. The last warp for reading `topk_idx` and count for per-expert information
     if (warp_id < num_warps - 1) {
-        constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(EP_BFLOAT16);
+        constexpr int kNumElemsPerRead = sizeof(int4) / EP_BF16_SIZE;
         EP_DEVICE_ASSERT(kHidden % kNumElemsPerRead == 0);
         EP_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
         const auto num_threads = (num_warps - 1) * 32;
@@ -525,11 +525,11 @@ combine(void* combined_x, int32_t* active_ranks,
     const auto responsible_expert_idx = sm_id * kNumWarpGroups + warp_group_id;
 
     // Data type staffs
-    constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(EP_BFLOAT16);
+    constexpr int kNumElemsPerInt4 = sizeof(int4) / EP_BF16_SIZE;
     const size_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
 
     // Message package
-    constexpr size_t num_bytes_per_slot = kHidden * sizeof(EP_BFLOAT16);
+    constexpr size_t num_bytes_per_slot = kHidden * EP_BF16_SIZE;
     EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
     // Communication context — platform dispatch is inside comm_device.cuh
