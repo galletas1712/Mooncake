@@ -71,6 +71,7 @@ struct MooncakeEpBuffer {
 
     // GDR buffer — owned by p2p_transport_
     int buffer_idx{};
+    int phase_epochs[2]{};
     int64_t num_ep_buffer_bytes;
     void* gdr_buffer = nullptr;
 
