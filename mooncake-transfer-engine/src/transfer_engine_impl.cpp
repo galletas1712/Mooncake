@@ -129,6 +129,19 @@ int TransferEngineImpl::drainActiveBatchesLocked(
     return 0;
 }
 
+int TransferEngineImpl::releaseTransportResourcesLocked() {
+    for (auto* transport : multi_transports_->listTransports()) {
+        int rc = transport->checkpointReleaseGraphStableTransportResources();
+        if (rc) {
+            LOG(ERROR)
+                << "Mooncake graph-stable checkpoint resource release failed "
+                << "for transport " << transport->getName() << " rc=" << rc;
+            return rc;
+        }
+    }
+    return 0;
+}
+
 int TransferEngineImpl::releaseTransportRegistrationsLocked() {
     if (checkpoint_transport_registrations_released_) {
         return 0;
@@ -772,6 +785,18 @@ int TransferEngineImpl::checkpointPauseGraphStable(
                 << "Mooncake graph-stable checkpoint pause failed to restore "
                    "transport registrations after remote cache invalidation "
                    "failure rc="
+                << restore_rc;
+        }
+        checkpoint_quiescing_.store(false);
+        return rc;
+    }
+    rc = releaseTransportResourcesLocked();
+    if (rc) {
+        int restore_rc = restoreTransportRegistrationsLocked();
+        if (restore_rc) {
+            LOG(ERROR)
+                << "Mooncake graph-stable checkpoint pause failed to restore "
+                   "transport registrations after resource release failure rc="
                 << restore_rc;
         }
         checkpoint_quiescing_.store(false);

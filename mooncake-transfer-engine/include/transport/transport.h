@@ -404,6 +404,8 @@ class Transport {
         return -1;
     }
 
+    virtual int checkpointReleaseGraphStableTransportResources() { return 0; }
+
    protected:
     virtual int install(std::string &local_server_name,
                         std::shared_ptr<TransferMetadata> meta,

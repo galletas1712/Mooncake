@@ -77,6 +77,8 @@ class RdmaTransport : public Transport {
 
     int checkpointResumeGraphStableTransport() override;
 
+    int checkpointReleaseGraphStableTransportResources() override;
+
    private:
     // Internal version with force_sequential option to avoid nested parallelism
     int registerLocalMemoryInternal(void *addr, size_t length,

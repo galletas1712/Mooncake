@@ -396,8 +396,29 @@ int RdmaTransport::checkpointPauseGraphStableTransport() {
 }
 
 int RdmaTransport::checkpointResumeGraphStableTransport() {
-    LOG(INFO) << "RdmaTransport graph-stable checkpoint resume will lazily "
-                 "recreate endpoints/QPs from fresh peer metadata";
+    if (context_list_.empty()) {
+        int rc = initializeRdmaResources();
+        if (rc) {
+            LOG(ERROR) << "RdmaTransport graph-stable checkpoint resume failed "
+                          "to recreate RDMA contexts rc="
+                       << rc;
+            return rc;
+        }
+    }
+    LOG(INFO) << "RdmaTransport graph-stable checkpoint resume recreated RDMA "
+                 "contexts; endpoints/QPs will be lazily recreated from fresh "
+                 "peer metadata";
+    return 0;
+}
+
+int RdmaTransport::checkpointReleaseGraphStableTransportResources() {
+    if (context_list_.empty()) {
+        return 0;
+    }
+    context_list_.clear();
+    LOG(INFO) << "RdmaTransport graph-stable checkpoint released RDMA "
+                 "contexts, protection domains, completion queues, and "
+                 "verbs device fds before process checkpoint";
     return 0;
 }
 
@@ -719,6 +740,12 @@ int RdmaTransport::onSetupRdmaConnections(const HandShakeDesc &peer_desc,
     int index = 0;
     for (auto &entry : local_topology_->getHcaList()) {
         if (entry == local_nic_name) {
+            if (index >= static_cast<int>(context_list_.size())) {
+                LOG(ERROR)
+                    << "RdmaTransport received handshake while RDMA contexts "
+                       "are unavailable for graph-stable checkpoint pause";
+                return ERR_ENDPOINT;
+            }
             context = context_list_[index];
             break;
         }
