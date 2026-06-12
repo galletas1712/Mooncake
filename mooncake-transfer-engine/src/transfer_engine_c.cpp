@@ -250,3 +250,13 @@ int syncSegmentCache(transfer_engine_t engine) {
     TransferEngine *native = (TransferEngine *)engine;
     return native->syncSegmentCache();
 }
+
+int checkpointPauseGraphStable(transfer_engine_t engine) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->checkpointPauseGraphStable();
+}
+
+int checkpointResumeGraphStable(transfer_engine_t engine) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->checkpointResumeGraphStable();
+}

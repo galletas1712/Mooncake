@@ -1013,6 +1013,16 @@ int TransferEnginePy::warmupEfaSegment(const std::string& segment_name) {
 #endif
 }
 
+int TransferEnginePy::checkpointPauseGraphStable() {
+    pybind11::gil_scoped_release release;
+    return engine_->checkpointPauseGraphStable();
+}
+
+int TransferEnginePy::checkpointResumeGraphStable() {
+    pybind11::gil_scoped_release release;
+    return engine_->checkpointResumeGraphStable();
+}
+
 uintptr_t TransferEnginePy::getFirstBufferAddress(
     const std::string& segment_name) {
     Transport::SegmentHandle segment_id =
@@ -1219,6 +1229,10 @@ PYBIND11_MODULE(engine, m) {
                  &TransferEnginePy::getFirstBufferAddress)
             .def("warmup_efa_segment", &TransferEnginePy::warmupEfaSegment,
                  py::arg("segment_name"))
+            .def("checkpoint_pause_graph_stable",
+                 &TransferEnginePy::checkpointPauseGraphStable)
+            .def("checkpoint_resume_graph_stable",
+                 &TransferEnginePy::checkpointResumeGraphStable)
             .def("get_notifies", &TransferEnginePy::getNotifies)
             .def("send_probe", &TransferEnginePy::sendProbe,
                  py::arg("peer_server_name"),

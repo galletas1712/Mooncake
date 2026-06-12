@@ -35,6 +35,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("get_ipc_handle", &MooncakeEpBuffer::get_ipc_handle)
         .def("sync_nvlink_ipc_handles",
              &MooncakeEpBuffer::sync_nvlink_ipc_handles)
+        .def("checkpoint_pause_graph_stable",
+             &MooncakeEpBuffer::checkpoint_pause_graph_stable)
+        .def("checkpoint_resume_graph_stable",
+             &MooncakeEpBuffer::checkpoint_resume_graph_stable)
         .def("dispatch", &MooncakeEpBuffer::dispatch)
         .def("combine", &MooncakeEpBuffer::combine)
         .def("get_next_combine_buffer",

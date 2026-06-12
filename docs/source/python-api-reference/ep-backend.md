@@ -68,6 +68,31 @@ assert active_ranks.all()  # Verify that no ranks are broken
 
 For a full example, see `mooncake-wheel/tests/test_mooncake_backend.py`.
 
+### Graph-Stable Checkpointing
+
+Mooncake EP `Buffer` exposes `checkpoint_pause_graph_stable()` and
+`checkpoint_resume_graph_stable()` as fail-closed hooks. They currently return
+`ERR_NOT_IMPLEMENTED`.
+
+Safe CUDA-graph-stable checkpointing is not available yet:
+
+- EP kernels can dereference graph-visible device arrays such as `raddrs`,
+  `rkeys`, `qp_devctxs`, and `ipc_peer_ptrs`. Those arrays would need to remain
+  at the same virtual addresses and be refreshed in place after restore.
+- All outstanding dispatch/combine work must be quiesced before checkpoint.
+- QPs, MRs/rkeys, IPC handles, active-rank tensors, and related device contexts
+  must be released or invalidated and recreated without changing any
+  graph-visible addresses.
+- Mooncake Backend/PG collectives have similar requirements for staging buffer
+  virtual addresses, transfer-group metadata, mapped task buffers, active-rank
+  tensors, segment IDs, and Transfer Engine registrations. The existing full
+  shutdown path frees graph-visible buffers and is therefore not a graph-stable
+  pause/resume protocol.
+
+Until those semantics exist, checkpoint integrations must treat Mooncake EP and
+Mooncake Backend graph-stable pause/resume as unsupported instead of silently
+replaying captured graphs after restore.
+
 ---
 
 Recover usage (e.g., wants to recover rank #2):

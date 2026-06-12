@@ -27,6 +27,7 @@
 #include <sstream>
 #endif
 
+#include "error.h"
 #include "transfer_metadata_plugin.h"
 #include "transport/transport.h"
 #ifdef USE_BAREX
@@ -542,6 +543,25 @@ Status TransferEngineImpl::CheckSegmentStatus(SegmentID sid) {
 
 int TransferEngineImpl::closeSegment(Transport::SegmentHandle handle) {
     return 0;
+}
+
+int TransferEngineImpl::checkpointPauseGraphStable() {
+    LOG(ERROR)
+        << "Mooncake graph-stable checkpoint pause is not implemented. "
+        << "Preserving CUDA virtual addresses is insufficient because "
+        << "outstanding transfers and opaque transport, QP, MR, rkey, IPC, "
+        << "segment, and registration state cannot yet be safely quiesced "
+        << "and refreshed in place.";
+    return ERR_NOT_IMPLEMENTED;
+}
+
+int TransferEngineImpl::checkpointResumeGraphStable() {
+    LOG(ERROR)
+        << "Mooncake graph-stable checkpoint resume is not implemented. "
+        << "Opaque transport, QP, MR, rkey, IPC, segment, and registration "
+        << "state cannot yet be refreshed in place without invalidating "
+        << "CUDA graph-visible addresses.";
+    return ERR_NOT_IMPLEMENTED;
 }
 
 int TransferEngineImpl::removeLocalSegment(const std::string& segment_name) {

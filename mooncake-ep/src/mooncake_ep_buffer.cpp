@@ -4,6 +4,10 @@
 
 namespace mooncake {
 
+namespace {
+constexpr int kErrNotImplemented = -303;
+}
+
 // Check if all GPUs support fabric memory handles (MNNVL).
 // Mirrors the check in nvlink_transport.cpp.
 static bool supportFabricMem() {
@@ -569,6 +573,24 @@ int MooncakeEpBuffer::init_ibgda() {
         qps.push_back(qp);
     }
     return 0;
+}
+
+int MooncakeEpBuffer::checkpoint_pause_graph_stable() {
+    LOG(ERROR)
+        << "[EP] Graph-stable checkpoint pause is not implemented. "
+        << "EP CUDA graphs can dereference device arrays such as raddrs, "
+        << "rkeys, qp_devctxs, and ipc_peer_ptrs; preserving buffer virtual "
+        << "addresses alone is insufficient without quiescing kernels and "
+        << "refreshing transport handles in place.";
+    return kErrNotImplemented;
+}
+
+int MooncakeEpBuffer::checkpoint_resume_graph_stable() {
+    LOG(ERROR)
+        << "[EP] Graph-stable checkpoint resume is not implemented. "
+        << "QP, MR/rkey, IPC, and device context arrays cannot yet be "
+        << "refreshed in place for safe CUDA graph replay after restore.";
+    return kErrNotImplemented;
 }
 
 void MooncakeEpBuffer::update_local_qpns() {

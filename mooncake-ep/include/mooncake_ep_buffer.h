@@ -138,6 +138,10 @@ struct MooncakeEpBuffer {
 
     int init_ibgda();
 
+    int checkpoint_pause_graph_stable();
+
+    int checkpoint_resume_graph_stable();
+
     bool ibgda_disabled() { return ibgda_disabled_; }
 
     bool is_roce() { return is_roce_; }

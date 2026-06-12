@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #ifndef USE_TENT
+#include "error.h"
 #include "transfer_engine.h"
 #include "transfer_engine_impl.h"
 #include <utility>
@@ -196,6 +197,14 @@ int TransferEngine::syncSegmentCache(const std::string& segment_name) {
     return impl_->syncSegmentCache(segment_name);
 }
 
+int TransferEngine::checkpointPauseGraphStable() {
+    return impl_->checkpointPauseGraphStable();
+}
+
+int TransferEngine::checkpointResumeGraphStable() {
+    return impl_->checkpointResumeGraphStable();
+}
+
 std::shared_ptr<TransferMetadata> TransferEngine::getMetadata() {
     return impl_->getMetadata();
 }
@@ -222,6 +231,7 @@ std::shared_ptr<Topology> TransferEngine::getLocalTopology() {
 
 }  // namespace mooncake
 #else
+#include "error.h"
 #include "transfer_engine.h"
 #include "transfer_engine_impl.h"
 #include "tent/transfer_engine.h"
@@ -622,6 +632,28 @@ int TransferEngine::syncSegmentCache(const std::string& segment_name) {
         return 0;
     else
         return impl_->syncSegmentCache(segment_name);
+}
+
+int TransferEngine::checkpointPauseGraphStable() {
+    if (use_tent_) {
+        LOG(ERROR)
+            << "Mooncake graph-stable checkpoint pause is not implemented "
+            << "for TENT because opaque transport state cannot yet be "
+            << "quiesced and refreshed in place.";
+        return ERR_NOT_IMPLEMENTED;
+    }
+    return impl_->checkpointPauseGraphStable();
+}
+
+int TransferEngine::checkpointResumeGraphStable() {
+    if (use_tent_) {
+        LOG(ERROR)
+            << "Mooncake graph-stable checkpoint resume is not implemented "
+            << "for TENT because opaque transport state cannot yet be "
+            << "refreshed in place.";
+        return ERR_NOT_IMPLEMENTED;
+    }
+    return impl_->checkpointResumeGraphStable();
 }
 
 std::shared_ptr<TransferMetadata> TransferEngine::getMetadata() {

@@ -176,6 +176,10 @@ class TransferEngine {
 
     int syncSegmentCache(const std::string& segment_name = "");
 
+    int checkpointPauseGraphStable();
+
+    int checkpointResumeGraphStable();
+
     std::shared_ptr<TransferMetadata> getMetadata();
 
     bool checkOverlap(void* addr, uint64_t length);

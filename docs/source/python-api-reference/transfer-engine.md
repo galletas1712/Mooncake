@@ -117,6 +117,24 @@ Gets the RPC port that the transfer engine is listening on.
 **Returns:**
 - `int`: The RPC port number
 
+### Graph-Stable Checkpoint Hooks
+
+Mooncake exposes fail-closed hooks for runtimes that need to pause before a
+checkpoint and resume without recapturing CUDA graphs:
+
+```python
+checkpoint_pause_graph_stable()
+checkpoint_resume_graph_stable()
+```
+
+Both methods currently return `ERR_NOT_IMPLEMENTED`. Graph-stable checkpoint
+resume is unsafe today because keeping CUDA virtual addresses stable is
+necessary but not sufficient. A safe implementation must first quiesce all
+outstanding transfers and handles, then refresh opaque transport state in place,
+including QPs, memory registrations, rkeys, IPC handles, remote segments, and
+segment cache entries. Without those semantics, a restored process could replay
+a CUDA graph that still references stale transport-visible state.
+
 ### Buffer Management
 
 #### allocate_managed_buffer()

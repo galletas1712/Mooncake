@@ -165,6 +165,14 @@ int freeBatchID(transfer_engine_t engine, batch_id_t batch_id);
 
 int syncSegmentCache(transfer_engine_t engine);
 
+// Fail-closed hooks for checkpoint flows that need CUDA graph-visible
+// addresses to stay valid across pause/resume. Current Mooncake transports
+// cannot safely quiesce and refresh opaque QP/MR/rkey/IPC/segment state in
+// place, so both functions return ERR_NOT_IMPLEMENTED.
+int checkpointPauseGraphStable(transfer_engine_t engine);
+
+int checkpointResumeGraphStable(transfer_engine_t engine);
+
 #ifdef __cplusplus
 }
 #endif  // __cplusplus
