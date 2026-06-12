@@ -4,10 +4,6 @@
 
 namespace mooncake {
 
-namespace {
-constexpr int kErrNotImplemented = -303;
-}
-
 // Check if all GPUs support fabric memory handles (MNNVL).
 // Mirrors the check in nvlink_transport.cpp.
 static bool supportFabricMem() {
@@ -27,6 +23,19 @@ static bool supportFabricMem() {
         if (!supported) return false;
     }
     return true;
+}
+
+static bool isCudaVmmPointer(void* ptr) {
+#if defined(CUDA_VERSION) && CUDA_VERSION >= 10020
+    CUmemGenericAllocationHandle handle;
+    CUresult ret = cuMemRetainAllocationHandle(&handle, ptr);
+    if (ret != CUDA_SUCCESS) return false;
+    cuMemRelease(handle);
+    return true;
+#else
+    (void)ptr;
+    return false;
+#endif
 }
 
 // Check if IPv6 address is an IPv4-mapped address (::ffff:x.x.x.x)
@@ -179,6 +188,7 @@ MooncakeEpBuffer::MooncakeEpBuffer(int rank, int num_ranks,
     // Create 32 MiB workspace
     CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
     CUDA_CHECK(cudaMemsetAsync(workspace, 0, NUM_WORKSPACE_BYTES, comm_stream));
+    record_graph_stable_pointers();
 }
 
 MooncakeEpBuffer::~MooncakeEpBuffer() noexcept(false) {
@@ -216,6 +226,7 @@ MooncakeEpBuffer::dispatch(const torch::Tensor& x,
                            int num_max_dispatch_tokens_per_rank,
                            int num_experts, int timeout_us, bool use_fp8,
                            bool async, bool return_recv_hook) {
+    EP_HOST_ASSERT(not checkpoint_graph_stable_paused_);
     // Tensor checks
     // By default using `ptp128c` FP8 cast
     EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous() and
@@ -338,6 +349,7 @@ MooncakeEpBuffer::combine(const torch::Tensor& x, const torch::Tensor& topk_idx,
                           int timeout_us, bool zero_copy, bool async,
                           bool return_recv_hook,
                           const std::optional<torch::Tensor>& out) {
+    EP_HOST_ASSERT(not checkpoint_graph_stable_paused_);
     // Tensor checks
     EP_HOST_ASSERT(x.dim() == 3 and x.is_contiguous() and
                    x.scalar_type() == torch::kBFloat16);
@@ -575,22 +587,83 @@ int MooncakeEpBuffer::init_ibgda() {
     return 0;
 }
 
-int MooncakeEpBuffer::checkpoint_pause_graph_stable() {
-    LOG(ERROR)
-        << "[EP] Graph-stable checkpoint pause is not implemented. "
-        << "EP CUDA graphs can dereference device arrays such as raddrs, "
-        << "rkeys, qp_devctxs, and ipc_peer_ptrs; preserving buffer virtual "
-        << "addresses alone is insufficient without quiescing kernels and "
-        << "refreshing transport handles in place.";
-    return kErrNotImplemented;
+void MooncakeEpBuffer::record_graph_stable_pointers() {
+    graph_stable_ptrs_ = {
+        {"gdr_buffer", reinterpret_cast<uintptr_t>(gdr_buffer)},
+        {"raddrs", reinterpret_cast<uintptr_t>(raddrs)},
+        {"rkeys", reinterpret_cast<uintptr_t>(rkeys)},
+        {"qp_devctxs", reinterpret_cast<uintptr_t>(qp_devctxs)},
+        {"nvlink_available", reinterpret_cast<uintptr_t>(nvlink_available)},
+        {"ipc_peer_ptrs", reinterpret_cast<uintptr_t>(ipc_peer_ptrs)},
+    };
 }
 
-int MooncakeEpBuffer::checkpoint_resume_graph_stable() {
-    LOG(ERROR)
-        << "[EP] Graph-stable checkpoint resume is not implemented. "
-        << "QP, MR/rkey, IPC, and device context arrays cannot yet be "
-        << "refreshed in place for safe CUDA graph replay after restore.";
-    return kErrNotImplemented;
+bool MooncakeEpBuffer::validate_graph_stable_pointers() const {
+    const std::unordered_map<std::string, uintptr_t> current = {
+        {"gdr_buffer", reinterpret_cast<uintptr_t>(gdr_buffer)},
+        {"raddrs", reinterpret_cast<uintptr_t>(raddrs)},
+        {"rkeys", reinterpret_cast<uintptr_t>(rkeys)},
+        {"qp_devctxs", reinterpret_cast<uintptr_t>(qp_devctxs)},
+        {"nvlink_available", reinterpret_cast<uintptr_t>(nvlink_available)},
+        {"ipc_peer_ptrs", reinterpret_cast<uintptr_t>(ipc_peer_ptrs)},
+    };
+    for (const auto& [name, ptr] : graph_stable_ptrs_) {
+        auto it = current.find(name);
+        if (it == current.end() || it->second != ptr) {
+            LOG(ERROR) << "[EP] Graph-stable pointer changed for " << name
+                       << ": expected=0x" << std::hex << ptr
+                       << " actual=0x"
+                       << (it == current.end() ? 0 : it->second) << std::dec;
+            return false;
+        }
+        if (!isCudaVmmPointer(reinterpret_cast<void*>(ptr))) {
+            LOG(ERROR) << "[EP] Graph-stable pointer " << name
+                       << " is not CUDA VMM reserved/mapped memory: 0x"
+                       << std::hex << ptr << std::dec;
+            return false;
+        }
+    }
+    return true;
+}
+
+int MooncakeEpBuffer::checkpoint_pause_graph_stable() {
+    CUDA_CHECK(cudaStreamSynchronize(comm_stream.stream()));
+    if (checkpoint_graph_stable_paused_) {
+        return 0;
+    }
+    record_graph_stable_pointers();
+    if (!validate_graph_stable_pointers()) {
+        return -1;
+    }
+    checkpoint_graph_stable_paused_ = true;
+    LOG(INFO) << "[EP] Graph-stable checkpoint paused. Device pointer "
+                 "invariants recorded; caller must refresh QP/MR/GID/IPC "
+                 "metadata via update_local_qpns(), sync_ib()/sync_roce(), "
+                 "and sync_nvlink_ipc_handles() before resume.";
+    return 0;
+}
+
+int MooncakeEpBuffer::checkpoint_resume_graph_stable(
+    const std::string& fresh_metadata) {
+    if (!checkpoint_graph_stable_paused_) {
+        LOG(ERROR) << "[EP] Graph-stable checkpoint resume called before pause";
+        return -1;
+    }
+    if (fresh_metadata.empty()) {
+        LOG(ERROR) << "[EP] Graph-stable checkpoint resume requires fresh "
+                      "remote QP/MR/GID/IPC metadata. Rerun "
+                      "update_local_qpns(), sync_ib()/sync_roce(), and "
+                      "sync_nvlink_ipc_handles() before calling resume.";
+        return -1;
+    }
+    if (!validate_graph_stable_pointers()) {
+        return -1;
+    }
+    checkpoint_graph_stable_paused_ = false;
+    LOG(INFO) << "[EP] Graph-stable checkpoint resumed with stable device "
+                 "pointer invariants. Fresh metadata marker: "
+              << fresh_metadata;
+    return 0;
 }
 
 void MooncakeEpBuffer::update_local_qpns() {

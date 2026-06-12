@@ -6,6 +6,7 @@
 #include <torch/csrc/utils/pybind.h>
 #include <torch/python.h>
 #include <torch/torch.h>
+#include <string>
 
 namespace py = pybind11;
 
@@ -38,7 +39,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("checkpoint_pause_graph_stable",
              &MooncakeEpBuffer::checkpoint_pause_graph_stable)
         .def("checkpoint_resume_graph_stable",
-             &MooncakeEpBuffer::checkpoint_resume_graph_stable)
+             &MooncakeEpBuffer::checkpoint_resume_graph_stable,
+             py::arg("fresh_metadata") = "")
         .def("dispatch", &MooncakeEpBuffer::dispatch)
         .def("combine", &MooncakeEpBuffer::combine)
         .def("get_next_combine_buffer",

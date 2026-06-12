@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -53,6 +55,15 @@ using BufferEntry = Transport::BufferEntry;
 #ifdef ENABLE_MULTI_PROTOCOL
 using RegisteredBuffer = TransferEngine::RegisteredBuffer;
 #endif
+using GraphStableCheckpointOptions =
+    TransferEngine::GraphStableCheckpointOptions;
+
+inline bool isTerminalTransferStatus(TransferStatusEnum status) {
+    return status == TransferStatusEnum::COMPLETED ||
+           status == TransferStatusEnum::FAILED ||
+           status == TransferStatusEnum::CANCELED ||
+           status == TransferStatusEnum::TIMEOUT;
+}
 
 class TransferEngineImpl {
    public:
@@ -118,7 +129,16 @@ class TransferEngineImpl {
 
     Status submitTransfer(BatchID batch_id,
                           const std::vector<TransferRequest>& entries) {
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            if (checkpoint_graph_stable_paused_.load()) {
+                return Status::InvalidArgument(
+                    "TransferEngine is graph-stable checkpoint paused");
+            }
+            active_batch_ids_.insert(batch_id);
+        }
         Status s = multi_transports_->submitTransfer(batch_id, entries);
+        if (!s.ok()) removeActiveBatch(batch_id);
 #ifdef WITH_METRICS
         if (metrics_enabled_ && s.ok()) {
             auto& batch = Transport::toBatchDesc(batch_id);
@@ -139,9 +159,18 @@ class TransferEngineImpl {
         if (entries.empty()) {
             return Status::InvalidArgument("entries must not be empty");
         }
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            if (checkpoint_graph_stable_paused_.load()) {
+                return Status::InvalidArgument(
+                    "TransferEngine is graph-stable checkpoint paused");
+            }
+            active_batch_ids_.insert(batch_id);
+        }
         auto target_id = entries[0].target_id;
         Status s = multi_transports_->submitTransfer(batch_id, entries);
         if (!s.ok()) {
+            removeActiveBatch(batch_id);
             return s;
         }
 
@@ -178,8 +207,17 @@ class TransferEngineImpl {
     Status mp_submitTransfer(BatchID batch_id,
                              const std::vector<TransferRequest>& entries,
                              std::string& proto) {
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            if (checkpoint_graph_stable_paused_.load()) {
+                return Status::InvalidArgument(
+                    "TransferEngine is graph-stable checkpoint paused");
+            }
+            active_batch_ids_.insert(batch_id);
+        }
         Status s =
             multi_transports_->mp_submitTransfer(batch_id, entries, proto);
+        if (!s.ok()) removeActiveBatch(batch_id);
 #ifdef WITH_METRICS
         if (metrics_enabled_ && s.ok()) {
             auto& batch = Transport::toBatchDesc(batch_id);
@@ -200,10 +238,19 @@ class TransferEngineImpl {
         if (entries.empty()) {
             return Status::InvalidArgument("entries must not be empty");
         }
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            if (checkpoint_graph_stable_paused_.load()) {
+                return Status::InvalidArgument(
+                    "TransferEngine is graph-stable checkpoint paused");
+            }
+            active_batch_ids_.insert(batch_id);
+        }
         auto target_id = entries[0].target_id;
         Status s =
             multi_transports_->mp_submitTransfer(batch_id, entries, proto);
         if (!s.ok()) {
+            removeActiveBatch(batch_id);
             return s;
         }
 
@@ -237,7 +284,9 @@ class TransferEngineImpl {
     }
 
     Status freeBatchID(BatchID batch_id) {
-        return multi_transports_->freeBatchID(batch_id);
+        Status status = multi_transports_->freeBatchID(batch_id);
+        if (status.ok()) removeActiveBatch(batch_id);
+        return status;
     }
 
     int getNotifies(std::vector<TransferMetadata::NotifyDesc>& notifies);
@@ -260,11 +309,7 @@ class TransferEngineImpl {
         }
 
         {
-            bool is_terminal = (status.s == TransferStatusEnum::COMPLETED ||
-                                status.s == TransferStatusEnum::FAILED ||
-                                status.s == TransferStatusEnum::CANCELED ||
-                                status.s == TransferStatusEnum::TIMEOUT);
-            if (!is_terminal) {
+            if (!isTerminalTransferStatus(status.s)) {
                 goto metrics_done;
             }
 
@@ -305,9 +350,10 @@ class TransferEngineImpl {
             // skip_metrics=true to avoid double counting since we already
             // recorded metrics above
             TransferStatus dummy_status;
-            auto status = getBatchTransferStatus(batch_id, dummy_status, true);
-            if (!status.ok()) {
-                LOG(ERROR) << status.ToString();
+            auto batch_status =
+                getBatchTransferStatus(batch_id, dummy_status, true);
+            if (!batch_status.ok()) {
+                LOG(ERROR) << batch_status.ToString();
             }
         }
         return result;
@@ -325,6 +371,9 @@ class TransferEngineImpl {
             }
         }
 #endif
+        if (result.ok() && isTerminalTransferStatus(status.s)) {
+            removeActiveBatch(batch_id);
+        }
         if (result.ok() && status.s == TransferStatusEnum::COMPLETED) {
             // send notify
             RWSpinlock::WriteGuard guard(send_notifies_lock_);
@@ -360,6 +409,11 @@ class TransferEngineImpl {
     int checkpointPauseGraphStable();
 
     int checkpointResumeGraphStable();
+
+    int checkpointPauseGraphStable(const GraphStableCheckpointOptions& options);
+
+    int checkpointResumeGraphStable(
+        const GraphStableCheckpointOptions& options);
 
     std::shared_ptr<TransferMetadata> getMetadata() { return metadata_; }
 
@@ -413,11 +467,22 @@ class TransferEngineImpl {
 
     void eraseMemoryRegionLocked(void* addr);
 
+    bool graphStableVmmPreconditionsMetLocked(
+        const GraphStableCheckpointOptions& options) const;
+
+    void removeActiveBatch(BatchID batch_id) {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        active_batch_ids_.erase(batch_id);
+    }
+
     std::shared_ptr<TransferMetadata> metadata_;
     std::string local_server_name_;
     std::shared_ptr<MultiTransport> multi_transports_;
     std::shared_mutex mutex_;
     MemoryRegionMap local_memory_regions_;
+    std::set<BatchID> active_batch_ids_;
+    std::atomic<bool> checkpoint_graph_stable_paused_{false};
+    uint64_t checkpoint_generation_ = 0;
     std::shared_ptr<Topology> local_topology_;
 
     RWSpinlock send_notifies_lock_;

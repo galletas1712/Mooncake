@@ -119,21 +119,32 @@ Gets the RPC port that the transfer engine is listening on.
 
 ### Graph-Stable Checkpoint Hooks
 
-Mooncake exposes fail-closed hooks for runtimes that need to pause before a
+Mooncake exposes prototype hooks for runtimes that need to pause before a
 checkpoint and resume without recapturing CUDA graphs:
 
 ```python
 checkpoint_pause_graph_stable()
-checkpoint_resume_graph_stable()
+checkpoint_resume_graph_stable(fresh_bootstrap="", fresh_metadata="")
 ```
 
-Both methods currently return `ERR_NOT_IMPLEMENTED`. Graph-stable checkpoint
-resume is unsafe today because keeping CUDA virtual addresses stable is
-necessary but not sufficient. A safe implementation must first quiesce all
-outstanding transfers and handles, then refresh opaque transport state in place,
-including QPs, memory registrations, rkeys, IPC handles, remote segments, and
-segment cache entries. Without those semantics, a restored process could replay
-a CUDA graph that still references stale transport-visible state.
+Graph-stable checkpointing is feasible only under the CUDA VMM and
+stable-indirection model:
+
+- Graph-visible CUDA buffers must use reserved/mapped CUDA VMM memory so their
+  virtual addresses are preserved across restore.
+- The caller must quiesce all outstanding transfers before
+  `checkpoint_pause_graph_stable()`.
+- The caller must destroy/recreate transport/application/communicator state as
+  needed and refresh opaque handles behind stable graph-visible indirection
+  buffers.
+- `checkpoint_resume_graph_stable()` requires fresh bootstrap or remote metadata
+  for the restored node/IP before transfers are issued again.
+
+The current hooks enforce the local state-machine preconditions and block
+submissions while paused. They do not yet perform a complete production refresh
+of every QP, MR/rkey, IPC handle, and remote segment cache entry; integrations
+must still reload remote metadata and validate refreshed device-visible
+indirection before replaying captured CUDA graphs.
 
 ### Buffer Management
 

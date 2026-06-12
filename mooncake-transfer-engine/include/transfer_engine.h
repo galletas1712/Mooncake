@@ -15,6 +15,10 @@
 #ifndef MULTI_TRANSFER_ENGINE_H_
 #define MULTI_TRANSFER_ENGINE_H_
 
+#include <cstddef>
+#include <string>
+#include <vector>
+
 #include "memory_location.h"
 #include "multi_transport.h"
 #include "transfer_metadata.h"
@@ -66,6 +70,13 @@ class TransferEngine {
               update_metadata(update_metadata) {}
     };
 #endif
+
+    struct GraphStableCheckpointOptions {
+        bool require_vmm = true;
+        bool preserve_local_va = true;
+        std::string fresh_bootstrap;
+        std::string fresh_metadata;
+    };
 
     TransferEngine(bool auto_discover = false);
 
@@ -179,6 +190,11 @@ class TransferEngine {
     int checkpointPauseGraphStable();
 
     int checkpointResumeGraphStable();
+
+    int checkpointPauseGraphStable(const GraphStableCheckpointOptions& options);
+
+    int checkpointResumeGraphStable(
+        const GraphStableCheckpointOptions& options);
 
     std::shared_ptr<TransferMetadata> getMetadata();
 

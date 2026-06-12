@@ -5,7 +5,10 @@
 #include <cuda_bf16.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cstdint>
 #include <fstream>
+#include <string>
+#include <unordered_map>
 #include <transport/device/ibgda/memheap.h>
 #include <transport/device/ibgda/mlx5gda.h>
 #include <mooncake_ep_api.cuh>
@@ -109,6 +112,11 @@ struct MooncakeEpBuffer {
 
     // Workspace
     void* workspace = nullptr;
+    bool checkpoint_graph_stable_paused_ = false;
+    std::unordered_map<std::string, uintptr_t> graph_stable_ptrs_;
+
+    void record_graph_stable_pointers();
+    bool validate_graph_stable_pointers() const;
 
    public:
     MooncakeEpBuffer(int rank, int num_ranks, int64_t num_ep_buffer_bytes,
@@ -140,7 +148,8 @@ struct MooncakeEpBuffer {
 
     int checkpoint_pause_graph_stable();
 
-    int checkpoint_resume_graph_stable();
+    int checkpoint_resume_graph_stable(
+        const std::string& fresh_metadata = "");
 
     bool ibgda_disabled() { return ibgda_disabled_; }
 

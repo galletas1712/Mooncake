@@ -198,11 +198,21 @@ int TransferEngine::syncSegmentCache(const std::string& segment_name) {
 }
 
 int TransferEngine::checkpointPauseGraphStable() {
-    return impl_->checkpointPauseGraphStable();
+    return checkpointPauseGraphStable(GraphStableCheckpointOptions{});
 }
 
 int TransferEngine::checkpointResumeGraphStable() {
-    return impl_->checkpointResumeGraphStable();
+    return checkpointResumeGraphStable(GraphStableCheckpointOptions{});
+}
+
+int TransferEngine::checkpointPauseGraphStable(
+    const GraphStableCheckpointOptions& options) {
+    return impl_->checkpointPauseGraphStable(options);
+}
+
+int TransferEngine::checkpointResumeGraphStable(
+    const GraphStableCheckpointOptions& options) {
+    return impl_->checkpointResumeGraphStable(options);
 }
 
 std::shared_ptr<TransferMetadata> TransferEngine::getMetadata() {
@@ -635,25 +645,36 @@ int TransferEngine::syncSegmentCache(const std::string& segment_name) {
 }
 
 int TransferEngine::checkpointPauseGraphStable() {
-    if (use_tent_) {
-        LOG(ERROR)
-            << "Mooncake graph-stable checkpoint pause is not implemented "
-            << "for TENT because opaque transport state cannot yet be "
-            << "quiesced and refreshed in place.";
-        return ERR_NOT_IMPLEMENTED;
-    }
-    return impl_->checkpointPauseGraphStable();
+    return checkpointPauseGraphStable(GraphStableCheckpointOptions{});
 }
 
 int TransferEngine::checkpointResumeGraphStable() {
+    return checkpointResumeGraphStable(GraphStableCheckpointOptions{});
+}
+
+int TransferEngine::checkpointPauseGraphStable(
+    const GraphStableCheckpointOptions& options) {
     if (use_tent_) {
         LOG(ERROR)
-            << "Mooncake graph-stable checkpoint resume is not implemented "
-            << "for TENT because opaque transport state cannot yet be "
-            << "refreshed in place.";
-        return ERR_NOT_IMPLEMENTED;
+            << "Mooncake graph-stable checkpoint pause prototype requires "
+            << "legacy TransferEngine state bookkeeping; TENT integration "
+            << "must provide equivalent quiesce hooks before use.";
+        return ERR_INVALID_ARGUMENT;
     }
-    return impl_->checkpointResumeGraphStable();
+    return impl_->checkpointPauseGraphStable(options);
+}
+
+int TransferEngine::checkpointResumeGraphStable(
+    const GraphStableCheckpointOptions& options) {
+    if (use_tent_) {
+        LOG(ERROR)
+            << "Mooncake graph-stable checkpoint resume prototype requires "
+            << "legacy TransferEngine state bookkeeping and fresh metadata; "
+            << "TENT integration must provide equivalent refresh hooks before "
+            << "use.";
+        return ERR_INVALID_ARGUMENT;
+    }
+    return impl_->checkpointResumeGraphStable(options);
 }
 
 std::shared_ptr<TransferMetadata> TransferEngine::getMetadata() {

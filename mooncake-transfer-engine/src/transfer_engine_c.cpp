@@ -251,6 +251,21 @@ int syncSegmentCache(transfer_engine_t engine) {
     return native->syncSegmentCache();
 }
 
+static TransferEngine::GraphStableCheckpointOptions graphStableOptionsFromC(
+    const graph_stable_checkpoint_options_t *options) {
+    TransferEngine::GraphStableCheckpointOptions native_options;
+    if (!options) return native_options;
+    native_options.require_vmm = options->require_vmm != 0;
+    native_options.preserve_local_va = options->preserve_local_va != 0;
+    if (options->fresh_bootstrap) {
+        native_options.fresh_bootstrap = options->fresh_bootstrap;
+    }
+    if (options->fresh_metadata) {
+        native_options.fresh_metadata = options->fresh_metadata;
+    }
+    return native_options;
+}
+
 int checkpointPauseGraphStable(transfer_engine_t engine) {
     TransferEngine *native = (TransferEngine *)engine;
     return native->checkpointPauseGraphStable();
@@ -259,4 +274,16 @@ int checkpointPauseGraphStable(transfer_engine_t engine) {
 int checkpointResumeGraphStable(transfer_engine_t engine) {
     TransferEngine *native = (TransferEngine *)engine;
     return native->checkpointResumeGraphStable();
+}
+
+int checkpointPauseGraphStableWithOptions(
+    transfer_engine_t engine, const graph_stable_checkpoint_options_t *options) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->checkpointPauseGraphStable(graphStableOptionsFromC(options));
+}
+
+int checkpointResumeGraphStableWithOptions(
+    transfer_engine_t engine, const graph_stable_checkpoint_options_t *options) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->checkpointResumeGraphStable(graphStableOptionsFromC(options));
 }

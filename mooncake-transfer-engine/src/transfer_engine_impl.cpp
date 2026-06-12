@@ -22,6 +22,9 @@
 #include <string>
 #include <sys/resource.h>
 #include <unistd.h>
+#ifdef USE_CUDA
+#include <cuda.h>
+#endif
 #ifdef WITH_METRICS
 #include <iomanip>
 #include <sstream>
@@ -41,6 +44,34 @@ bool overlapWithRegion(uintptr_t addr, uint64_t length, void* region_addr,
                        uint64_t region_length) {
     return overlap(reinterpret_cast<void*>(addr), length, region_addr,
                    region_length);
+}
+
+bool isCudaVmmPointer(void* addr) {
+#if defined(USE_CUDA) && defined(CUDA_VERSION) && CUDA_VERSION >= 10020
+    (void)cuInit(0);
+    CUmemGenericAllocationHandle handle;
+    CUresult rc = cuMemRetainAllocationHandle(&handle, addr);
+    if (rc == CUDA_SUCCESS) {
+        cuMemRelease(handle);
+        return true;
+    }
+#else
+    (void)addr;
+#endif
+    return false;
+}
+
+bool isCudaDevicePointer(void* addr) {
+#ifdef USE_CUDA
+    (void)cuInit(0);
+    CUmemorytype type;
+    CUresult rc = cuPointerGetAttribute(&type, CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+                                        reinterpret_cast<CUdeviceptr>(addr));
+    return rc == CUDA_SUCCESS && type == CU_MEMORYTYPE_DEVICE;
+#else
+    (void)addr;
+    return false;
+#endif
 }
 }  // namespace
 
@@ -546,22 +577,63 @@ int TransferEngineImpl::closeSegment(Transport::SegmentHandle handle) {
 }
 
 int TransferEngineImpl::checkpointPauseGraphStable() {
-    LOG(ERROR)
-        << "Mooncake graph-stable checkpoint pause is not implemented. "
-        << "Preserving CUDA virtual addresses is insufficient because "
-        << "outstanding transfers and opaque transport, QP, MR, rkey, IPC, "
-        << "segment, and registration state cannot yet be safely quiesced "
-        << "and refreshed in place.";
-    return ERR_NOT_IMPLEMENTED;
+    return checkpointPauseGraphStable(GraphStableCheckpointOptions{});
 }
 
 int TransferEngineImpl::checkpointResumeGraphStable() {
-    LOG(ERROR)
-        << "Mooncake graph-stable checkpoint resume is not implemented. "
-        << "Opaque transport, QP, MR, rkey, IPC, segment, and registration "
-        << "state cannot yet be refreshed in place without invalidating "
-        << "CUDA graph-visible addresses.";
-    return ERR_NOT_IMPLEMENTED;
+    return checkpointResumeGraphStable(GraphStableCheckpointOptions{});
+}
+
+int TransferEngineImpl::checkpointPauseGraphStable(
+    const GraphStableCheckpointOptions& options) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_graph_stable_paused_.load()) {
+        return 0;
+    }
+    if (!active_batch_ids_.empty()) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint pause requires a "
+                      "quiesced TransferEngine; "
+                   << active_batch_ids_.size() << " batch(es) are active";
+        return ERR_BATCH_BUSY;
+    }
+    if (!graphStableVmmPreconditionsMetLocked(options)) {
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    checkpoint_graph_stable_paused_.store(true);
+    ++checkpoint_generation_;
+    LOG(INFO) << "Mooncake graph-stable checkpoint paused. Local registered "
+                 "virtual addresses are retained; new submissions are "
+                 "blocked until checkpointResumeGraphStable() succeeds. "
+                 "Remote bootstrap/segment metadata must be refreshed after "
+                 "resume before transfers are posted.";
+    return 0;
+}
+
+int TransferEngineImpl::checkpointResumeGraphStable(
+    const GraphStableCheckpointOptions& options) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint resume called before "
+                      "a successful pause";
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (options.fresh_bootstrap.empty() && options.fresh_metadata.empty()) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint resume requires fresh "
+                      "bootstrap or remote metadata for the restored node/IP";
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (!graphStableVmmPreconditionsMetLocked(options)) {
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    checkpoint_graph_stable_paused_.store(false);
+    ++checkpoint_generation_;
+    LOG(INFO) << "Mooncake graph-stable checkpoint resumed with fresh "
+                 "bootstrap/metadata markers. Callers must reopen/sync remote "
+                 "segments and refresh graph-visible indirection buffers "
+                 "before replaying captured CUDA graphs.";
+    return 0;
 }
 
 int TransferEngineImpl::removeLocalSegment(const std::string& segment_name) {
@@ -831,6 +903,28 @@ void TransferEngineImpl::insertMemoryRegionLocked(const MemoryRegion& region) {
 
 void TransferEngineImpl::eraseMemoryRegionLocked(void* addr) {
     local_memory_regions_.erase(reinterpret_cast<uintptr_t>(addr));
+}
+
+bool TransferEngineImpl::graphStableVmmPreconditionsMetLocked(
+    const GraphStableCheckpointOptions& options) const {
+    if (!options.preserve_local_va) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint requires preserving "
+                      "local virtual addresses";
+        return false;
+    }
+    if (!options.require_vmm) {
+        return true;
+    }
+    for (const auto& [_, region] : local_memory_regions_) {
+        if (isCudaDevicePointer(region.addr) && !isCudaVmmPointer(region.addr)) {
+            LOG(ERROR) << "Mooncake graph-stable checkpoint requires CUDA VMM "
+                          "reserved/mapped memory for graph-visible "
+                          "registrations. addr="
+                       << region.addr << " length=" << region.length;
+            return false;
+        }
+    }
+    return true;
 }
 
 #ifdef WITH_METRICS

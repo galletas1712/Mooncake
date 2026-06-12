@@ -168,9 +168,13 @@ class TransferEnginePy {
     // No-op on non-EFA builds or when the EFA transport is not installed.
     int warmupEfaSegment(const std::string &segment_name);
 
-    int checkpointPauseGraphStable();
+    int checkpointPauseGraphStable(bool require_vmm = true,
+                                   bool preserve_local_va = true);
 
-    int checkpointResumeGraphStable();
+    int checkpointResumeGraphStable(const std::string &fresh_bootstrap = "",
+                                    const std::string &fresh_metadata = "",
+                                    bool require_vmm = true,
+                                    bool preserve_local_va = true);
 
     int writeBytesToBuffer(uintptr_t dest_address, char *src_ptr,
                            size_t length) {

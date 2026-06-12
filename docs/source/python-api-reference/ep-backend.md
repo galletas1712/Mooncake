@@ -71,27 +71,27 @@ For a full example, see `mooncake-wheel/tests/test_mooncake_backend.py`.
 ### Graph-Stable Checkpointing
 
 Mooncake EP `Buffer` exposes `checkpoint_pause_graph_stable()` and
-`checkpoint_resume_graph_stable()` as fail-closed hooks. They currently return
-`ERR_NOT_IMPLEMENTED`.
+`checkpoint_resume_graph_stable(fresh_metadata="...")` as prototype hooks.
 
-Safe CUDA-graph-stable checkpointing is not available yet:
+CUDA-graph-stable checkpointing requires CUDA VMM allocations and stable
+graph-visible indirection:
 
-- EP kernels can dereference graph-visible device arrays such as `raddrs`,
-  `rkeys`, `qp_devctxs`, and `ipc_peer_ptrs`. Those arrays would need to remain
-  at the same virtual addresses and be refreshed in place after restore.
+- EP kernels dereference graph-visible device arrays such as `gdr_buffer`,
+  `raddrs`, `rkeys`, `qp_devctxs`, `nvlink_available`, and `ipc_peer_ptrs`.
+  The hooks record these pointer values on pause and validate that they have not
+  changed on resume.
 - All outstanding dispatch/combine work must be quiesced before checkpoint.
-- QPs, MRs/rkeys, IPC handles, active-rank tensors, and related device contexts
-  must be released or invalidated and recreated without changing any
-  graph-visible addresses.
+- The caller must refresh remote QP/MR/GID/IPC metadata before resume. Today the
+  expected sequence is to rerun `update_local_qpns()`, `sync_ib()` or
+  `sync_roce()`, and `sync_nvlink_ipc_handles()` with fresh peer metadata, then
+  call `checkpoint_resume_graph_stable(fresh_metadata=...)`.
+- QPs, MRs/rkeys, IPC handles, active-rank tensors, and device contexts still
+  need complete production teardown/recreate plumbing. The prototype validates
+  pointer invariants and paused-state ordering; it does not claim a complete
+  transport refresh.
 - Mooncake Backend/PG collectives have similar requirements for staging buffer
   virtual addresses, transfer-group metadata, mapped task buffers, active-rank
-  tensors, segment IDs, and Transfer Engine registrations. The existing full
-  shutdown path frees graph-visible buffers and is therefore not a graph-stable
-  pause/resume protocol.
-
-Until those semantics exist, checkpoint integrations must treat Mooncake EP and
-Mooncake Backend graph-stable pause/resume as unsupported instead of silently
-replaying captured graphs after restore.
+  tensors, segment IDs, and Transfer Engine registrations.
 
 ---
 

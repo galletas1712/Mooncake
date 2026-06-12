@@ -92,6 +92,15 @@ typedef struct segment_desc segment_desc_t;
 typedef void *transfer_engine_t;
 typedef void *transport_t;
 
+struct graph_stable_checkpoint_options {
+    int require_vmm;
+    int preserve_local_va;
+    const char *fresh_bootstrap;
+    const char *fresh_metadata;
+};
+
+typedef struct graph_stable_checkpoint_options graph_stable_checkpoint_options_t;
+
 /*
  * All memory pointed to by the "char *" parameters will not be used
  * after the C function returns.
@@ -165,13 +174,18 @@ int freeBatchID(transfer_engine_t engine, batch_id_t batch_id);
 
 int syncSegmentCache(transfer_engine_t engine);
 
-// Fail-closed hooks for checkpoint flows that need CUDA graph-visible
-// addresses to stay valid across pause/resume. Current Mooncake transports
-// cannot safely quiesce and refresh opaque QP/MR/rkey/IPC/segment state in
-// place, so both functions return ERR_NOT_IMPLEMENTED.
+// Prototype hooks for checkpoint flows that need CUDA graph-visible addresses
+// to stay valid across pause/resume. They require VMM/stable-address
+// preconditions, no active transfers, and fresh bootstrap/metadata on resume.
 int checkpointPauseGraphStable(transfer_engine_t engine);
 
 int checkpointResumeGraphStable(transfer_engine_t engine);
+
+int checkpointPauseGraphStableWithOptions(
+    transfer_engine_t engine, const graph_stable_checkpoint_options_t *options);
+
+int checkpointResumeGraphStableWithOptions(
+    transfer_engine_t engine, const graph_stable_checkpoint_options_t *options);
 
 #ifdef __cplusplus
 }

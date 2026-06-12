@@ -1013,14 +1013,36 @@ int TransferEnginePy::warmupEfaSegment(const std::string& segment_name) {
 #endif
 }
 
-int TransferEnginePy::checkpointPauseGraphStable() {
+int TransferEnginePy::checkpointPauseGraphStable(bool require_vmm,
+                                                 bool preserve_local_va) {
     pybind11::gil_scoped_release release;
-    return engine_->checkpointPauseGraphStable();
+    TransferEngine::GraphStableCheckpointOptions options;
+    options.require_vmm = require_vmm;
+    options.preserve_local_va = preserve_local_va;
+    int ret = engine_->checkpointPauseGraphStable(options);
+    if (ret == 0) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        for (auto& handle : handle_map_) engine_->closeSegment(handle.second);
+        handle_map_.clear();
+    }
+    return ret;
 }
 
-int TransferEnginePy::checkpointResumeGraphStable() {
+int TransferEnginePy::checkpointResumeGraphStable(
+    const std::string& fresh_bootstrap, const std::string& fresh_metadata,
+    bool require_vmm, bool preserve_local_va) {
     pybind11::gil_scoped_release release;
-    return engine_->checkpointResumeGraphStable();
+    TransferEngine::GraphStableCheckpointOptions options;
+    options.require_vmm = require_vmm;
+    options.preserve_local_va = preserve_local_va;
+    options.fresh_bootstrap = fresh_bootstrap;
+    options.fresh_metadata = fresh_metadata;
+    int ret = engine_->checkpointResumeGraphStable(options);
+    if (ret == 0) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        handle_map_.clear();
+    }
+    return ret;
 }
 
 uintptr_t TransferEnginePy::getFirstBufferAddress(
@@ -1230,9 +1252,15 @@ PYBIND11_MODULE(engine, m) {
             .def("warmup_efa_segment", &TransferEnginePy::warmupEfaSegment,
                  py::arg("segment_name"))
             .def("checkpoint_pause_graph_stable",
-                 &TransferEnginePy::checkpointPauseGraphStable)
+                 &TransferEnginePy::checkpointPauseGraphStable,
+                 py::arg("require_vmm") = true,
+                 py::arg("preserve_local_va") = true)
             .def("checkpoint_resume_graph_stable",
-                 &TransferEnginePy::checkpointResumeGraphStable)
+                 &TransferEnginePy::checkpointResumeGraphStable,
+                 py::arg("fresh_bootstrap") = "",
+                 py::arg("fresh_metadata") = "",
+                 py::arg("require_vmm") = true,
+                 py::arg("preserve_local_va") = true)
             .def("get_notifies", &TransferEnginePy::getNotifies)
             .def("send_probe", &TransferEnginePy::sendProbe,
                  py::arg("peer_server_name"),
