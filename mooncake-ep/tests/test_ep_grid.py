@@ -45,13 +45,13 @@ def run_test_iteration(
     num_tokens = int(max_tokens * scale)
 
     # Prepare test data
-    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16, device="cuda")
-    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32, device="cuda")
+    x = torch.randn(num_tokens, hidden, dtype=torch.bfloat16)
+    scores = torch.randn((num_tokens, num_experts), dtype=torch.float32)
     topk_idx = torch.topk(scores, top_k, dim=-1)[1]
     topk_weights = torch.softmax(
-        torch.rand(num_tokens, top_k, dtype=torch.float32, device="cuda"), dim=-1
+        torch.rand(num_tokens, top_k, dtype=torch.float32), dim=-1
     )
-    active_ranks = torch.ones((num_ranks,), dtype=torch.int32, device="cuda")
+    active_ranks = torch.ones((num_ranks,), dtype=torch.int32)
 
     # Prepare expected result
     def get_mock_factor(expert_id):

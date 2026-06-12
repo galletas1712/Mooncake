@@ -3,9 +3,6 @@ import torch
 import torch.distributed as dist
 from typing import Any, Callable, List, Tuple, Optional, Union
 
-_USE_MUSA = os.getenv("MOONCAKE_EP_USE_MUSA", "").upper() in {"1", "ON", "TRUE", "YES"}
-_DEVICE = "musa" if _USE_MUSA else "cuda"
-
 
 class EventOverlap:
     """
@@ -92,17 +89,17 @@ class Buffer:
         if not self._use_fallback:
             (raddr, rkey) = self.runtime.get_mr_info()
 
-            raddr = torch.tensor([raddr], dtype=torch.int64, device=_DEVICE)
+            raddr = torch.tensor([raddr], dtype=torch.int64, device="cuda")
             raddrs = [
-                torch.empty(1, dtype=torch.int64, device=_DEVICE)
+                torch.empty(1, dtype=torch.int64, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_gather(raddrs, raddr, self.group)
             raddrs = torch.cat(raddrs).tolist()
 
-            rkey = torch.tensor([rkey], dtype=torch.int32, device=_DEVICE)
+            rkey = torch.tensor([rkey], dtype=torch.int32, device="cuda")
             rkeys = [
-                torch.empty(1, dtype=torch.int32, device=_DEVICE)
+                torch.empty(1, dtype=torch.int32, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_gather(rkeys, rkey, self.group)
@@ -116,13 +113,13 @@ class Buffer:
             local_qpns = self.runtime.get_local_qpns()
             local_qpns = list(
                 torch.unbind(
-                    torch.tensor(local_qpns, dtype=torch.int32, device=_DEVICE).view(
+                    torch.tensor(local_qpns, dtype=torch.int32, device="cuda").view(
                         -1, all_to_all_size
                     )
                 )
             )
             remote_qpns = [
-                torch.empty(all_to_all_size, dtype=torch.int32, device=_DEVICE)
+                torch.empty(all_to_all_size, dtype=torch.int32, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_to_all(remote_qpns, local_qpns, self.group)
@@ -131,30 +128,30 @@ class Buffer:
             local_lids = self.runtime.get_local_lids()
             local_lids = list(
                 torch.unbind(
-                    torch.tensor(local_lids, dtype=torch.int32, device=_DEVICE).view(
+                    torch.tensor(local_lids, dtype=torch.int32, device="cuda").view(
                         -1, all_to_all_size
                     )
                 )
             )
             remote_lids = [
-                torch.empty(all_to_all_size, dtype=torch.int32, device=_DEVICE)
+                torch.empty(all_to_all_size, dtype=torch.int32, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_to_all(remote_lids, local_lids, self.group)
             peer_lids = [remote_lids[r].tolist() for r in range(self.group_size)]
 
             (subnet_prefix, interface_id) = self.runtime.get_gid()
-            subnet_prefix_t = torch.tensor([subnet_prefix], dtype=torch.int64, device=_DEVICE)
+            subnet_prefix_t = torch.tensor([subnet_prefix], dtype=torch.int64, device="cuda")
             subnet_prefixes_list = [
-                torch.empty(1, dtype=torch.int64, device=_DEVICE)
+                torch.empty(1, dtype=torch.int64, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_gather(subnet_prefixes_list, subnet_prefix_t, self.group)
             subnet_prefixes = torch.cat(subnet_prefixes_list).tolist()
 
-            interface_id_t = torch.tensor([interface_id], dtype=torch.int64, device=_DEVICE)
+            interface_id_t = torch.tensor([interface_id], dtype=torch.int64, device="cuda")
             interface_ids_list = [
-                torch.empty(1, dtype=torch.int64, device=_DEVICE)
+                torch.empty(1, dtype=torch.int64, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_gather(interface_ids_list, interface_id_t, self.group)
@@ -171,10 +168,10 @@ class Buffer:
             local_handle_ints = self.runtime.get_ipc_handle()
             # pybind11 converts std::vector<int32_t> to a list of integers
             local_handle_tensor = torch.tensor(
-                local_handle_ints, dtype=torch.int32, device=_DEVICE
+                local_handle_ints, dtype=torch.int32, device="cuda"
             )
             handles = [
-                torch.empty(len(local_handle_ints), dtype=torch.int32, device=_DEVICE)
+                torch.empty(len(local_handle_ints), dtype=torch.int32, device="cuda")
                 for _ in range(self.group_size)
             ]
             dist.all_gather(handles, local_handle_tensor, self.group)
@@ -241,7 +238,7 @@ class Buffer:
         # splits no-hook calls into SEND -> phase-ack -> RECV instead of using
         # a single cooperative kernel.  async_finish still returns a stream
         # event, but it is not the CUDA single-kernel cooperative path.
-        if _USE_MUSA and async_finish:
+        if os.getenv("MOONCAKE_EP_USE_MUSA") and async_finish:
             import warnings
 
             warnings.warn(
@@ -334,7 +331,7 @@ class Buffer:
         out: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, EventOverlap, Callable]:
         # Same MUSA split-kernel behavior as dispatch().
-        if _USE_MUSA and async_finish:
+        if os.getenv("MOONCAKE_EP_USE_MUSA") and async_finish:
             import warnings
 
             warnings.warn(
@@ -426,7 +423,7 @@ class Buffer:
                         hidden,
                     ),
                     dtype=torch.bfloat16,
-                    device=_DEVICE,
+                    device="cuda",
                 )
             return self._fallback_next_combine_buffer
         return self.runtime.get_next_combine_buffer(
@@ -438,11 +435,7 @@ class Buffer:
     # -----------------
     class _DummyEvent:
         def current_stream_wait(self):
-            if _USE_MUSA:
-                import torch_musa
-                torch_musa.synchronize()
-            else:
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
     @staticmethod
     def _fp8_cast(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -465,6 +458,8 @@ class Buffer:
         use_fp8: bool,
         return_recv_hook: bool,
     ):
+        from mooncake.ep import get_active_ranks
+
         with torch.profiler.record_function("dispatch"):
             num_tokens, hidden = x.shape
             k = topk_idx.size(1)
@@ -481,7 +476,6 @@ class Buffer:
             ]
             dist.all_gather(num_tokens_list, num_tokens_tensor, group=self.group)
             num_tokens_per_rank = [t.item() for t in num_tokens_list]
-            from mooncake.ep import get_active_ranks
             backend_active_ranks = get_active_ranks(self.backend).tolist()
             for i in range(num_ranks):
                 if backend_active_ranks[i] == 0:
@@ -688,6 +682,8 @@ class Buffer:
         return_recv_hook: bool,
         out: Optional[torch.Tensor],
     ):
+        from mooncake.ep import get_active_ranks
+
         with torch.profiler.record_function("combine"):
             num_tokens = topk_idx.size(0)
             hidden = (x if not zero_copy else self._fallback_next_combine_buffer).size(
@@ -706,7 +702,6 @@ class Buffer:
             ]
             dist.all_gather(num_tokens_list, num_tokens_tensor, group=self.group)
             num_tokens_per_rank = [t.item() for t in num_tokens_list]
-            from mooncake.ep import get_active_ranks
             backend_active_ranks = get_active_ranks(self.backend).tolist()
             for i in range(num_ranks):
                 if backend_active_ranks[i] == 0:
@@ -801,8 +796,6 @@ class Buffer:
                         send_buf[src_rank, tokens_valid] += contrib_valid * weights
 
             # All-reduce then take local slice (only valid tokens)
-            # Mooncake PG supports MUSA device tensors; avoid CPU round-trips
-            # here because CPU->MUSA copies can hang after the CPU collective.
             dist.all_reduce(send_buf, group=self.group)
             combined_x = send_buf[self.rank, :num_tokens]
 
