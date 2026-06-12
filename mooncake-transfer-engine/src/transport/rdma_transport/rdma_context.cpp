@@ -534,6 +534,18 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
 #endif
     if (!mrMeta.mr) {
         PLOG(ERROR) << "Failed to register memory " << addr;
+#if defined(USE_CUDA)
+        if (Environ::Get().GetWithNvidiaPeermem()) {
+            LOG(ERROR)
+                << "WITH_NVIDIA_PEERMEM is enabled, so CUDA GPU memory is "
+                   "registered through legacy ibv_reg_mr(). CUDA VMM "
+                   "graph-stable checkpoint buffers require GPU-direct RDMA "
+                   "registration through DMA-BUF on systems without a working "
+                   "nvidia-peermem path. Unset WITH_NVIDIA_PEERMEM or set "
+                   "WITH_NVIDIA_PEERMEM=0 to use Mooncake's CUDA DMA-BUF "
+                   "registration path.";
+        }
+#endif
         return ERR_CONTEXT;
     }
     return 0;
