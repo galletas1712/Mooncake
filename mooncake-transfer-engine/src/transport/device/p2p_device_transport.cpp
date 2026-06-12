@@ -90,11 +90,7 @@ class P2pDeviceTransportImpl : public P2pTransport {
         cudaGetDevice(&device_id);
         int device_count = 0;
         cudaGetDeviceCount(&device_count);
-        if (device_count <= 0) {
-            LOG(ERROR) << "[EP P2P] No CUDA/MUSA devices found";
-            all_peers_accessible_ = false;
-            return;
-        }
+        CHECK_GT(device_count, 0) << "No CUDA/MUSA devices found";
 
         std::vector<int32_t> available(num_ranks_, 0);
         available[rank] = 1;
@@ -185,9 +181,6 @@ class P2pDeviceTransportImpl : public P2pTransport {
 
         int device_id = 0;
         cudaGetDevice(&device_id);
-        LOG(WARNING) << "[EP P2P] verifyPeerAccess is a debug-only check: "
-                        "it writes test bytes into peer-mapped EP buffers and "
-                        "must not run concurrently with EP kernels";
 
         bool all_ok = true;
         for (int i = 0; i < num_ranks_; ++i) {

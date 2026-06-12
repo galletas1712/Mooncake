@@ -5,14 +5,6 @@
 
 namespace mooncake {
 
-static bool envFlagEnabled(const char* name) {
-    const char* value = std::getenv(name);
-    if (!value) return false;
-    std::string s(value);
-    return s == "1" || s == "ON" || s == "on" || s == "TRUE" || s == "true" ||
-           s == "YES" || s == "yes";
-}
-
 // Initialize an RDMA transport: register memory, allocate control buffer,
 // create QPs.  Returns true on success, false if IBGDA is unavailable.
 static bool initRdmaTransport(device::RdmaTransport* t, void* gdr_buffer,
@@ -59,12 +51,7 @@ MooncakeEpBuffer::MooncakeEpBuffer(int rank, int num_ranks,
     CUDA_CHECK(cudaMemset(gdr_buffer, 0, num_ep_buffer_bytes));
 
     // RDMA transport — optional; disabled if init fails.
-    const bool disable_ibgda = envFlagEnabled("MOONCAKE_EP_DISABLE_IBGDA");
-    if (disable_ibgda) {
-        ibgda_disabled_ = true;
-        LOG(INFO) << "[EP] IBGDA disabled by MOONCAKE_EP_DISABLE_IBGDA, "
-                     "using P2P-only path";
-    } else if (engine) {
+    if (engine) {
         rdma_transport_ = engine->getOrCreateRdmaTransport();
         if (rdma_transport_) {
             if (!initRdmaTransport(rdma_transport_, gdr_buffer,

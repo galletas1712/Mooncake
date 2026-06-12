@@ -30,7 +30,6 @@ std::string MooncakeBackend::hostIp_ = "127.0.0.1";
 TransferEngine* MooncakeBackend::engine_ = new TransferEngine(true);
 // worker_ is now owned per backend instance via MooncakeWorkerManager.
 bool MooncakeBackend::engineInitialized_ = false;
-std::atomic<int> MooncakeBackend::activeBackendCount_{0};
 int MooncakeBackend::backendIndex_ = 0;
 TransferEngine* MooncakeBackend::externalEngine_ = nullptr;
 
@@ -428,9 +427,6 @@ MooncakeBackend::MooncakeBackend(
 #ifndef MOONCAKE_EP_USE_MUSA
     setDefaultBackend(BackendType::CUSTOM);
 #endif
-
-    activeBackendCount_.fetch_add(1, std::memory_order_acq_rel);
-    counted_ = true;
 
     // Increment backend index
     ++backendIndex_;
@@ -1024,23 +1020,6 @@ void MooncakeBackend::shutdown() {
         }
         meta_->activeRanks = nullptr;
         meta_->activeRanksDevice = nullptr;
-    }
-
-    p2p_proxy_.reset();
-    connection_ctx_.reset();
-    p2p_device_worker_.reset();
-    worker_.reset();
-    meta_.reset();
-
-    if (counted_) {
-        counted_ = false;
-        const bool last_backend =
-            activeBackendCount_.fetch_sub(1, std::memory_order_acq_rel) == 1;
-        if (last_backend && !externalEngine_) {
-            engine_->freeEngine();
-            engineInitialized_ = false;
-            backendIndex_ = 0;
-        }
     }
 }
 

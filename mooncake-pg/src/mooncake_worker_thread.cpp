@@ -341,9 +341,7 @@ std::shared_ptr<MooncakeWorker> MooncakeWorkerManager::GetWorker(
     std::lock_guard<std::mutex> lock(manager_mutex_);
     auto it = workers_.find(worker_id);
     if (it != workers_.end()) {
-        if (auto worker = it->second.lock()) {
-            return worker;
-        }
+        return it->second;
     }
     auto worker = std::make_shared<MooncakeWorker>(worker_id);
     workers_[worker_id] = worker;

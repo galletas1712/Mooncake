@@ -171,7 +171,9 @@ class MooncakeWorkerManager {
     std::shared_ptr<MooncakeWorker> GetWorker(int worker_id);
     static constexpr int CPUWorkerID = -1;
     std::mutex manager_mutex_;
-    std::unordered_map<int, std::weak_ptr<MooncakeWorker>> workers_;
+    // Keep workers alive for the entire process lifetime because their
+    // detached threads must not outlive the MooncakeWorker object.
+    std::unordered_map<int, std::shared_ptr<MooncakeWorker>> workers_;
 };
 #endif  // !defined(__MUSA__)
 
