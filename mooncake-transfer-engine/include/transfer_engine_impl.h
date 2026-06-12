@@ -491,6 +491,10 @@ class TransferEngineImpl {
 
     int restoreTransportRegistrationsLocked();
 
+    int pauseInstalledTransportsLocked();
+
+    int resumeInstalledTransportsLocked();
+
     int clearRemoteSegmentCacheLocked();
 
     void removeActiveBatch(BatchID batch_id) {

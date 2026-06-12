@@ -662,6 +662,32 @@ int EfaTransport::unregisterLocalMemoryBatch(
     return metadata_->updateLocalSegmentDesc();
 }
 
+int EfaTransport::checkpointPauseGraphStableTransport() {
+    int rc = 0;
+    for (auto& context : context_list_) {
+        if (!context) continue;
+        int ret = context->disconnectAllEndpoints();
+        if (ret) {
+            LOG(ERROR) << "EfaTransport graph-stable checkpoint pause "
+                          "failed to disconnect endpoints rc="
+                       << ret;
+            rc = ret;
+        }
+    }
+    if (rc == 0) {
+        LOG(INFO) << "EfaTransport graph-stable checkpoint pause "
+                     "disconnected peer AV entries/endpoints; fresh "
+                     "handshakes are required after resume";
+    }
+    return rc;
+}
+
+int EfaTransport::checkpointResumeGraphStableTransport() {
+    LOG(INFO) << "EfaTransport graph-stable checkpoint resume will lazily "
+                 "insert fresh peer AV entries from fresh metadata";
+    return 0;
+}
+
 int EfaTransport::warmupSegment(const std::string& segment_name) {
     if (!metadata_) {
         LOG(ERROR) << "EfaTransport::warmupSegment: metadata_ is null";

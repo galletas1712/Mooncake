@@ -64,6 +64,10 @@ class NvlinkTransport : public Transport {
 
     const char* getName() const override { return "nvlink"; }
 
+    int checkpointPauseGraphStableTransport() override;
+
+    int checkpointResumeGraphStableTransport() override;
+
    private:
     std::atomic_bool running_;
 

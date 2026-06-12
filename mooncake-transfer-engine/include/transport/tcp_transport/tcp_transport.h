@@ -108,6 +108,10 @@ class TcpTransport : public Transport {
 
     const char *getName() const override { return "tcp"; }
 
+    int checkpointPauseGraphStableTransport() override;
+
+    int checkpointResumeGraphStableTransport() override;
+
    private:
     TcpContext *context_;
     std::atomic_bool running_;

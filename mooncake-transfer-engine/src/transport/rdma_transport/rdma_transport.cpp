@@ -374,6 +374,33 @@ int RdmaTransport::unregisterLocalMemoryInternal(void *addr,
     return 0;
 }
 
+int RdmaTransport::checkpointPauseGraphStableTransport() {
+    int rc = 0;
+    for (auto& context : context_list_) {
+        if (!context) continue;
+        int ret = context->disconnectAllEndpoints();
+        if (ret) {
+            LOG(ERROR) << "RdmaTransport graph-stable checkpoint pause "
+                          "failed to disconnect endpoints rc="
+                       << ret;
+            rc = ret;
+        }
+        context->reclaimEndpoints();
+    }
+    if (rc == 0) {
+        LOG(INFO) << "RdmaTransport graph-stable checkpoint pause "
+                     "disconnected RDMA endpoints/QPs; fresh handshakes "
+                     "are required after resume";
+    }
+    return rc;
+}
+
+int RdmaTransport::checkpointResumeGraphStableTransport() {
+    LOG(INFO) << "RdmaTransport graph-stable checkpoint resume will lazily "
+                 "recreate endpoints/QPs from fresh peer metadata";
+    return 0;
+}
+
 int RdmaTransport::allocateLocalSegmentID() {
     auto desc = metadata_->getSegmentDescByID(LOCAL_SEGMENT_ID);
     if (!desc) desc = std::make_shared<SegmentDesc>();

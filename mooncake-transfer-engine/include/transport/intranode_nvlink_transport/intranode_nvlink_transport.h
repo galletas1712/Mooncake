@@ -65,6 +65,10 @@ class IntraNodeNvlinkTransport : public Transport {
 
     const char* getName() const override { return "nvlink_intraNode"; }
 
+    int checkpointPauseGraphStableTransport() override;
+
+    int checkpointResumeGraphStableTransport() override;
+
    private:
     std::atomic_bool running_;
 

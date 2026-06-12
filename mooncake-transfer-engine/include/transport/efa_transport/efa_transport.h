@@ -70,6 +70,10 @@ class EfaTransport : public Transport {
     int unregisterLocalMemoryBatch(
         const std::vector<void*>& addr_list) override;
 
+    int checkpointPauseGraphStableTransport() override;
+
+    int checkpointResumeGraphStableTransport() override;
+
     // Eagerly populate the address vector with every (local_ctx, peer_nic)
     // handshake for `segment_name`.
     //

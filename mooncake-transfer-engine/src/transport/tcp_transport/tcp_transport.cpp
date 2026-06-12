@@ -731,6 +731,30 @@ int TcpTransport::unregisterLocalMemoryBatch(
     return metadata_->updateLocalSegmentDesc();
 }
 
+int TcpTransport::checkpointPauseGraphStableTransport() {
+    std::lock_guard<std::mutex> lock(pool_mutex_);
+    size_t closed = 0;
+    for (auto& entry : connection_pool_) {
+        for (auto& pooled : entry.second) {
+            if (pooled && pooled->socket && pooled->socket->is_open()) {
+                std::error_code ec;
+                pooled->socket->close(ec);
+                ++closed;
+            }
+        }
+    }
+    connection_pool_.clear();
+    LOG(INFO) << "TcpTransport graph-stable checkpoint pause closed "
+              << closed << " pooled client connection(s)";
+    return 0;
+}
+
+int TcpTransport::checkpointResumeGraphStableTransport() {
+    LOG(INFO) << "TcpTransport graph-stable checkpoint resume will lazily "
+                 "open fresh connections";
+    return 0;
+}
+
 Status TcpTransport::getTransferStatus(BatchID batch_id, size_t task_id,
                                        TransferStatus& status) {
     auto& batch_desc = *((BatchDesc*)(batch_id));

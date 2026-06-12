@@ -513,6 +513,37 @@ int NvlinkTransport::unregisterLocalMemoryBatch(
     return metadata_->updateLocalSegmentDesc();
 }
 
+int NvlinkTransport::checkpointPauseGraphStableTransport() {
+    RWSpinlock::WriteGuard guard(remap_lock_);
+    size_t closed = 0;
+    for (auto& entry : remap_entries_) {
+        if (entry.second.shm_addr) {
+            if (use_fabric_mem_) {
+                freePinnedLocalMemory(entry.second.shm_addr);
+            } else {
+                cudaError_t err = cudaIpcCloseMemHandle(entry.second.shm_addr);
+                if (err != cudaSuccess) {
+                    LOG(ERROR) << "NvlinkTransport graph-stable checkpoint "
+                                  "pause failed to close IPC handle: "
+                               << cudaGetErrorString(err);
+                    return -1;
+                }
+            }
+            ++closed;
+        }
+    }
+    remap_entries_.clear();
+    LOG(INFO) << "NvlinkTransport graph-stable checkpoint pause closed "
+              << closed << " remote CUDA IPC/fabric remap(s)";
+    return 0;
+}
+
+int NvlinkTransport::checkpointResumeGraphStableTransport() {
+    LOG(INFO) << "NvlinkTransport graph-stable checkpoint resume will lazily "
+                 "import fresh CUDA IPC/fabric handles";
+    return 0;
+}
+
 void *NvlinkTransport::allocatePinnedLocalMemory(size_t size) {
     if (!supportFabricMem()) {
         void *ptr = nullptr;

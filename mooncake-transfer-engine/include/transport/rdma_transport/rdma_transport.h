@@ -73,6 +73,10 @@ class RdmaTransport : public Transport {
     int unregisterLocalMemoryBatch(
         const std::vector<void *> &addr_list) override;
 
+    int checkpointPauseGraphStableTransport() override;
+
+    int checkpointResumeGraphStableTransport() override;
+
    private:
     // Internal version with force_sequential option to avoid nested parallelism
     int registerLocalMemoryInternal(void *addr, size_t length,

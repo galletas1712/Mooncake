@@ -31,6 +31,8 @@
 #include <mutex>
 #include <condition_variable>
 
+#include <glog/logging.h>
+
 #include "common/base/status.h"
 #include "transfer_metadata.h"
 
@@ -387,6 +389,20 @@ class Transport {
         return Status::OK();
     }
     virtual Status CheckStatus(SegmentID sid) { return Status::OK(); }
+
+    virtual int checkpointPauseGraphStableTransport() {
+        LOG(ERROR) << "Transport " << getName()
+                   << " does not implement graph-stable checkpoint pause; "
+                      "refusing checkpoint because transport-owned QPs, "
+                      "IPC mappings, or endpoint state may remain live";
+        return -1;
+    }
+
+    virtual int checkpointResumeGraphStableTransport() {
+        LOG(ERROR) << "Transport " << getName()
+                   << " does not implement graph-stable checkpoint resume";
+        return -1;
+    }
 
    protected:
     virtual int install(std::string &local_server_name,

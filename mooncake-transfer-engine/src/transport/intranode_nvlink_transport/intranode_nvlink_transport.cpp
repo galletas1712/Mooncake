@@ -656,6 +656,34 @@ int IntraNodeNvlinkTransport::unregisterLocalMemoryBatch(
     return metadata_->updateLocalSegmentDesc();
 }
 
+int IntraNodeNvlinkTransport::checkpointPauseGraphStableTransport() {
+    RWSpinlock::WriteGuard guard(remap_lock_);
+    size_t closed = 0;
+    for (auto& entry : remap_entries_) {
+        if (entry.second.shm_addr) {
+            cudaError_t err = cudaIpcCloseMemHandle(entry.second.shm_addr);
+            if (err != cudaSuccess) {
+                LOG(ERROR) << "IntraNodeNvlinkTransport graph-stable "
+                              "checkpoint pause failed to close IPC handle: "
+                           << cudaGetErrorString(err);
+                return -1;
+            }
+            ++closed;
+        }
+    }
+    remap_entries_.clear();
+    LOG(INFO) << "IntraNodeNvlinkTransport graph-stable checkpoint pause "
+                 "closed "
+              << closed << " remote CUDA IPC remap(s)";
+    return 0;
+}
+
+int IntraNodeNvlinkTransport::checkpointResumeGraphStableTransport() {
+    LOG(INFO) << "IntraNodeNvlinkTransport graph-stable checkpoint resume "
+                 "will lazily import fresh CUDA IPC handles";
+    return 0;
+}
+
 void *IntraNodeNvlinkTransport::allocatePinnedLocalMemory(size_t size) {
     void *ptr = nullptr;
     cudaError_t res = cudaMalloc(&ptr, size);

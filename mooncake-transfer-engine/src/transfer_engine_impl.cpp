@@ -205,6 +205,32 @@ int TransferEngineImpl::restoreTransportRegistrationsLocked() {
     return 0;
 }
 
+int TransferEngineImpl::pauseInstalledTransportsLocked() {
+    for (auto* transport : multi_transports_->listTransports()) {
+        int rc = transport->checkpointPauseGraphStableTransport();
+        if (rc) {
+            LOG(ERROR) << "Mooncake graph-stable checkpoint pause failed for "
+                       << "transport " << transport->getName()
+                       << " rc=" << rc;
+            return rc;
+        }
+    }
+    return 0;
+}
+
+int TransferEngineImpl::resumeInstalledTransportsLocked() {
+    for (auto* transport : multi_transports_->listTransports()) {
+        int rc = transport->checkpointResumeGraphStableTransport();
+        if (rc) {
+            LOG(ERROR) << "Mooncake graph-stable checkpoint resume failed for "
+                       << "transport " << transport->getName()
+                       << " rc=" << rc;
+            return rc;
+        }
+    }
+    return 0;
+}
+
 int TransferEngineImpl::clearRemoteSegmentCacheLocked() {
     if (!metadata_) {
         return 0;
@@ -728,6 +754,11 @@ int TransferEngineImpl::checkpointPauseGraphStable(
         return ERR_INVALID_ARGUMENT;
     }
 
+    rc = pauseInstalledTransportsLocked();
+    if (rc) {
+        checkpoint_quiescing_.store(false);
+        return rc;
+    }
     rc = releaseTransportRegistrationsLocked();
     if (rc) {
         checkpoint_quiescing_.store(false);
@@ -775,7 +806,11 @@ int TransferEngineImpl::checkpointResumeGraphStable(
         return ERR_INVALID_ARGUMENT;
     }
 
-    int rc = metadata_->rePublishRpcMetaEntry(local_server_name_);
+    int rc = resumeInstalledTransportsLocked();
+    if (rc) {
+        return rc;
+    }
+    rc = metadata_->rePublishRpcMetaEntry(local_server_name_);
     if (rc) {
         LOG(ERROR) << "Mooncake graph-stable checkpoint resume failed to "
                       "re-publish local RPC metadata for "
