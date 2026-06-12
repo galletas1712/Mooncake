@@ -424,53 +424,6 @@ void dispatch(void* packed_recv_x, float* packed_recv_x_scales,
     auto atomic_finish_counter_per_expert = atomic_counter_per_expert + num_experts;
     EP_HOST_ASSERT(num_experts * sizeof(int) * 2 <= NUM_WORKSPACE_BYTES);
 
-#ifdef MOONCAKE_EP_USE_MUSA
-// MUSA split-phase launch: SEND and RECV run as separate kernels.
-#define DISPATCH_LAUNCH_CASE(hidden) { \
-auto dispatch_func = use_fp8 ? dispatch<true, kNumWarpGroups, kNumWarpsPerGroup, hidden> : \
-                               dispatch<false, kNumWarpGroups, kNumWarpsPerGroup, hidden>; \
-if (phases & LOW_LATENCY_SEND_PHASE) { \
-LAUNCH_KERNEL(&cfg, dispatch_func, \
-              packed_recv_x, packed_recv_x_scales, \
-              packed_recv_src_info, packed_recv_layout_range, \
-              packed_recv_count, active_ranks, \
-              mxa_buffer, \
-              rdma_send_signal_buffer, rdma_recv_signal_buffer, \
-              rdma_send_data_buffer, rdma_recv_data_buffer, \
-              cuda_counter_buffer, cuda_data_buffer, \
-              raddrs, rkeys, qp_devctxs, \
-              nvlink_available, ipc_peer_ptrs, \
-              x, topk_idx, \
-              atomic_counter_per_expert, atomic_finish_counter_per_expert, \
-              next_clean_buffer, \
-              num_tokens, num_max_dispatch_tokens_per_rank, \
-              num_topk, num_experts, rank, num_ranks, timeout_ticks, \
-              LOW_LATENCY_SEND_PHASE); \
-cudaDeviceSynchronize(); \
-} \
-if (phases & LOW_LATENCY_RECV_PHASE) { \
-LAUNCH_KERNEL(&cfg, dispatch_func, \
-              packed_recv_x, packed_recv_x_scales, \
-              packed_recv_src_info, packed_recv_layout_range, \
-              packed_recv_count, active_ranks, \
-              mxa_buffer, \
-              rdma_send_signal_buffer, rdma_recv_signal_buffer, \
-              rdma_send_data_buffer, rdma_recv_data_buffer, \
-              cuda_counter_buffer, cuda_data_buffer, \
-              raddrs, rkeys, qp_devctxs, \
-              nvlink_available, ipc_peer_ptrs, \
-              x, topk_idx, \
-              atomic_counter_per_expert, atomic_finish_counter_per_expert, \
-              next_clean_buffer, \
-              num_tokens, num_max_dispatch_tokens_per_rank, \
-              num_topk, num_experts, rank, num_ranks, timeout_ticks, \
-              LOW_LATENCY_RECV_PHASE); \
-cudaDeviceSynchronize(); \
-} \
-} break
-
-    SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
-#else
 #define DISPATCH_LAUNCH_CASE(hidden) { \
 auto dispatch_func = use_fp8 ? dispatch<true, kNumWarpGroups, kNumWarpsPerGroup, hidden> : \
                                dispatch<false, kNumWarpGroups, kNumWarpsPerGroup, hidden>; \
@@ -491,7 +444,6 @@ LAUNCH_KERNEL(&cfg, dispatch_func, \
               num_topk, num_experts, rank, num_ranks, timeout_ticks, phases); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
-#endif
     SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
 #undef DISPATCH_LAUNCH_CASE
 }
@@ -730,50 +682,6 @@ void combine(void* combined_x, int32_t* active_ranks,
     EP_HOST_ASSERT(sizeof(int) <= NUM_WORKSPACE_BYTES);
     EP_HOST_ASSERT(num_topk <= kNumMaxTopk);
 
-#ifdef MOONCAKE_EP_USE_MUSA
-// Multi-block: split send/recv phases with device sync between them.
-#define COMBINE_LAUNCH_CASE(hidden) { \
-auto combine_func = combine<kNumWarpGroups, kNumWarpsPerGroup, hidden, kNumMaxTopk>; \
-if (phases & LOW_LATENCY_SEND_PHASE) { \
-LAUNCH_KERNEL(&cfg, combine_func, \
-              combined_x, active_ranks, \
-              mxa_buffer, \
-              rdma_send_signal_buffer, rdma_recv_signal_buffer, \
-              rdma_send_data_buffer, rdma_recv_data_buffer, \
-              cuda_counter_buffer, cuda_data_buffer, \
-              raddrs, rkeys, qp_devctxs, \
-              nvlink_available, ipc_peer_ptrs, \
-              x, topk_idx, topk_weights, src_info, layout_range, \
-              next_clean_buffer, \
-              atomic_clean_flag, \
-              num_combined_tokens, hidden, num_topk, \
-              num_max_dispatch_tokens_per_rank, \
-              num_experts, rank, num_ranks, \
-              timeout_ticks, LOW_LATENCY_SEND_PHASE, zero_copy); \
-cudaDeviceSynchronize(); \
-} \
-if (phases & LOW_LATENCY_RECV_PHASE) { \
-LAUNCH_KERNEL(&cfg, combine_func, \
-              combined_x, active_ranks, \
-              mxa_buffer, \
-              rdma_send_signal_buffer, rdma_recv_signal_buffer, \
-              rdma_send_data_buffer, rdma_recv_data_buffer, \
-              cuda_counter_buffer, cuda_data_buffer, \
-              raddrs, rkeys, qp_devctxs, \
-              nvlink_available, ipc_peer_ptrs, \
-              x, topk_idx, topk_weights, src_info, layout_range, \
-              next_clean_buffer, \
-              atomic_clean_flag, \
-              num_combined_tokens, hidden, num_topk, \
-              num_max_dispatch_tokens_per_rank, \
-              num_experts, rank, num_ranks, \
-              timeout_ticks, LOW_LATENCY_RECV_PHASE, zero_copy); \
-cudaDeviceSynchronize(); \
-} \
-} break
-
-    SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
-#else
 #define COMBINE_LAUNCH_CASE(hidden) { \
 auto combine_func = combine<kNumWarpGroups, kNumWarpsPerGroup, hidden, kNumMaxTopk>; \
 LAUNCH_KERNEL(&cfg, combine_func, \
@@ -793,7 +701,6 @@ LAUNCH_KERNEL(&cfg, combine_func, \
               timeout_ticks, phases, zero_copy); } break
 
     SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
-#endif
     SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }
