@@ -67,6 +67,102 @@ static int findBestGidIndex(ibv_context* ctx, uint8_t port,
     return -1;
 }
 
+void* MooncakeEpBuffer::allocate_graph_stable_cuda(size_t bytes,
+                                                   bool fabric_handle,
+                                                   const char* name) {
+    CUdevice cu_dev;
+    CUresult res = cuDeviceGet(&cu_dev, device_id);
+    if (res != CUDA_SUCCESS) {
+        LOG(ERROR) << "[EP] cuDeviceGet failed for " << name << ": " << res;
+        throw std::runtime_error("cuDeviceGet failed");
+    }
+
+    CUmemAllocationProp prop = {};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    prop.location.id = cu_dev;
+    prop.requestedHandleTypes =
+        fabric_handle ? CU_MEM_HANDLE_TYPE_FABRIC : CUmemAllocationHandleType{};
+
+    int rdma_flag = 0;
+    cuDeviceGetAttribute(
+        &rdma_flag,
+        CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, cu_dev);
+    if (rdma_flag) prop.allocFlags.gpuDirectRDMACapable = 1;
+
+    size_t granularity = 0;
+    res = cuMemGetAllocationGranularity(&granularity, &prop,
+                                        CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    if (res != CUDA_SUCCESS) {
+        LOG(ERROR) << "[EP] cuMemGetAllocationGranularity failed for " << name
+                   << ": " << res;
+        throw std::runtime_error("cuMemGetAllocationGranularity failed");
+    }
+
+    size_t mapped_size = (bytes + granularity - 1) & ~(granularity - 1);
+    if (mapped_size == 0) mapped_size = granularity;
+
+    CUmemGenericAllocationHandle handle;
+    res = cuMemCreate(&handle, mapped_size, &prop, 0);
+    if (res != CUDA_SUCCESS) {
+        LOG(ERROR) << "[EP] cuMemCreate failed for " << name << ": " << res;
+        throw std::runtime_error("cuMemCreate failed");
+    }
+
+    CUdeviceptr dptr = 0;
+    res = cuMemAddressReserve(&dptr, mapped_size, granularity, 0, 0);
+    if (res != CUDA_SUCCESS) {
+        cuMemRelease(handle);
+        LOG(ERROR) << "[EP] cuMemAddressReserve failed for " << name << ": "
+                   << res;
+        throw std::runtime_error("cuMemAddressReserve failed");
+    }
+
+    res = cuMemMap(dptr, mapped_size, 0, handle, 0);
+    if (res != CUDA_SUCCESS) {
+        cuMemAddressFree(dptr, mapped_size);
+        cuMemRelease(handle);
+        LOG(ERROR) << "[EP] cuMemMap failed for " << name << ": " << res;
+        throw std::runtime_error("cuMemMap failed");
+    }
+
+    int device_count = 0;
+    cudaGetDeviceCount(&device_count);
+    std::vector<CUmemAccessDesc> access(device_count);
+    for (int i = 0; i < device_count; ++i) {
+        access[i].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        access[i].location.id = i;
+        access[i].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    }
+    res = cuMemSetAccess(dptr, mapped_size, access.data(), device_count);
+    if (res != CUDA_SUCCESS) {
+        cuMemUnmap(dptr, mapped_size);
+        cuMemAddressFree(dptr, mapped_size);
+        cuMemRelease(handle);
+        LOG(ERROR) << "[EP] cuMemSetAccess failed for " << name << ": "
+                   << res;
+        throw std::runtime_error("cuMemSetAccess failed");
+    }
+
+    void* ptr = reinterpret_cast<void*>(dptr);
+    vmm_allocations_[ptr] = VmmAllocation{handle, mapped_size};
+    return ptr;
+}
+
+void MooncakeEpBuffer::free_graph_stable_cuda(void* ptr) {
+    if (!ptr) return;
+    auto it = vmm_allocations_.find(ptr);
+    if (it == vmm_allocations_.end()) {
+        cudaFree(ptr);
+        return;
+    }
+    CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(ptr);
+    cuMemUnmap(dptr, it->second.mapped_size);
+    cuMemAddressFree(dptr, it->second.mapped_size);
+    cuMemRelease(it->second.handle);
+    vmm_allocations_.erase(it);
+}
+
 MooncakeEpBuffer::MooncakeEpBuffer(int rank, int num_ranks,
                                    int64_t num_ep_buffer_bytes,
                                    std::string device_name)
@@ -80,101 +176,33 @@ MooncakeEpBuffer::MooncakeEpBuffer(int rank, int num_ranks,
     CUDA_CHECK(cudaGetDevice(&device_id));
     CUDA_CHECK(cudaDeviceGetAttribute(&clock_rate_khz, cudaDevAttrClockRate,
                                       device_id));
+    qps.resize(USE_QP_COUNT, nullptr);
 
     // Allocate gdr_buffer. On MNNVL clusters, use cuMemCreate with a fabric
     // handle so the buffer is accessible cross-node via NVLink fabric.
-    // On IB clusters or single-node setups, fall back to cudaMalloc.
+    // On IB clusters or single-node setups, use non-exported CUDA VMM so the
+    // graph-visible virtual address is stable across checkpoint/restore.
     use_fabric_mem_ = supportFabricMem();
-    if (use_fabric_mem_) {
-        CUdevice cu_dev;
-        CUresult res = cuDeviceGet(&cu_dev, device_id);
-        if (res != CUDA_SUCCESS) {
-            LOG(ERROR) << "[EP] cuDeviceGet failed: " << res;
-            throw std::runtime_error("cuDeviceGet failed");
-        }
-
-        CUmemAllocationProp prop = {};
-        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-        prop.location.id = cu_dev;
-        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
-
-        int rdma_flag = 0;
-        cuDeviceGetAttribute(
-            &rdma_flag,
-            CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-            cu_dev);
-        if (rdma_flag) prop.allocFlags.gpuDirectRDMACapable = 1;
-
-        size_t granularity = 0;
-        res = cuMemGetAllocationGranularity(&granularity, &prop,
-                                            CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-        if (res != CUDA_SUCCESS) {
-            LOG(ERROR) << "[EP] cuMemGetAllocationGranularity failed: " << res;
-            throw std::runtime_error("cuMemGetAllocationGranularity failed");
-        }
-
-        fabric_alloc_size_ =
-            (num_ep_buffer_bytes + granularity - 1) & ~(granularity - 1);
-        if (fabric_alloc_size_ == 0) fabric_alloc_size_ = granularity;
-
-        res = cuMemCreate(&fabric_mem_handle_, fabric_alloc_size_, &prop, 0);
-        if (res != CUDA_SUCCESS) {
-            LOG(ERROR) << "[EP] cuMemCreate(FABRIC) failed: " << res;
-            throw std::runtime_error("cuMemCreate failed");
-        }
-
-        CUdeviceptr dptr = 0;
-        res = cuMemAddressReserve(&dptr, fabric_alloc_size_, granularity, 0, 0);
-        if (res != CUDA_SUCCESS) {
-            cuMemRelease(fabric_mem_handle_);
-            LOG(ERROR) << "[EP] cuMemAddressReserve failed: " << res;
-            throw std::runtime_error("cuMemAddressReserve failed");
-        }
-
-        res = cuMemMap(dptr, fabric_alloc_size_, 0, fabric_mem_handle_, 0);
-        if (res != CUDA_SUCCESS) {
-            cuMemAddressFree(dptr, fabric_alloc_size_);
-            cuMemRelease(fabric_mem_handle_);
-            LOG(ERROR) << "[EP] cuMemMap failed: " << res;
-            throw std::runtime_error("cuMemMap failed");
-        }
-
-        // Grant read/write access to all devices in the fabric clique
-        int device_count = 0;
-        cudaGetDeviceCount(&device_count);
-        std::vector<CUmemAccessDesc> access(device_count);
-        for (int i = 0; i < device_count; ++i) {
-            access[i].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-            access[i].location.id = i;
-            access[i].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-        }
-        res = cuMemSetAccess(dptr, fabric_alloc_size_, access.data(),
-                             device_count);
-        if (res != CUDA_SUCCESS) {
-            cuMemUnmap(dptr, fabric_alloc_size_);
-            cuMemAddressFree(dptr, fabric_alloc_size_);
-            cuMemRelease(fabric_mem_handle_);
-            LOG(ERROR) << "[EP] cuMemSetAccess failed: " << res;
-            throw std::runtime_error("cuMemSetAccess failed");
-        }
-
-        gdr_buffer = reinterpret_cast<void*>(dptr);
-        LOG(INFO) << "[EP] Allocated " << fabric_alloc_size_
-                  << " bytes with fabric handle on GPU " << device_id;
-    } else {
-        CUDA_CHECK(cudaMalloc(&gdr_buffer, num_ep_buffer_bytes));
-    }
-    CUDA_CHECK(cudaMalloc(&raddrs, num_ranks * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&rkeys, num_ranks * sizeof(uint32_t)));
-    CUDA_CHECK(
-        cudaMalloc(&qp_devctxs, USE_QP_COUNT * sizeof(mlx5gda_qp_devctx)));
+    gdr_buffer = allocate_graph_stable_cuda(
+        num_ep_buffer_bytes, use_fabric_mem_, "gdr_buffer");
+    LOG(INFO) << "[EP] Allocated " << num_ep_buffer_bytes
+              << " graph-stable bytes on GPU " << device_id
+              << (use_fabric_mem_ ? " with fabric handle" : "");
+    raddrs = allocate_graph_stable_cuda(num_ranks * sizeof(uint64_t), false,
+                                        "raddrs");
+    rkeys = allocate_graph_stable_cuda(num_ranks * sizeof(uint32_t), false,
+                                       "rkeys");
+    qp_devctxs = allocate_graph_stable_cuda(
+        USE_QP_COUNT * sizeof(mlx5gda_qp_devctx), false, "qp_devctxs");
 
     // Allocate NVLink P2P arrays
-    CUDA_CHECK(cudaMalloc(&nvlink_available, num_ranks * sizeof(int32_t)));
+    nvlink_available = reinterpret_cast<int32_t*>(
+        allocate_graph_stable_cuda(num_ranks * sizeof(int32_t), false,
+                                   "nvlink_available"));
     CUDA_CHECK(cudaMemset(nvlink_available, 0, num_ranks * sizeof(int32_t)));
     CUDA_CHECK(cudaMallocHost(&ipc_peer_ptrs_host, num_ranks * sizeof(void*)));
-    CUDA_CHECK(cudaMalloc(&ipc_peer_ptrs, num_ranks * sizeof(void*)));
+    ipc_peer_ptrs = reinterpret_cast<void**>(allocate_graph_stable_cuda(
+        num_ranks * sizeof(void*), false, "ipc_peer_ptrs"));
     for (int i = 0; i < num_ranks; ++i) {
         ipc_peer_ptrs_host[i] = nullptr;
     }
@@ -186,33 +214,27 @@ MooncakeEpBuffer::MooncakeEpBuffer(int rank, int num_ranks,
     }
 
     // Create 32 MiB workspace
-    CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
+    workspace = allocate_graph_stable_cuda(NUM_WORKSPACE_BYTES, false,
+                                           "workspace");
     CUDA_CHECK(cudaMemsetAsync(workspace, 0, NUM_WORKSPACE_BYTES, comm_stream));
     record_graph_stable_pointers();
 }
 
 MooncakeEpBuffer::~MooncakeEpBuffer() noexcept(false) {
-    if (use_fabric_mem_) {
-        CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(gdr_buffer);
-        cuMemUnmap(dptr, fabric_alloc_size_);
-        cuMemAddressFree(dptr, fabric_alloc_size_);
-        cuMemRelease(fabric_mem_handle_);
-    } else {
-        cudaFree(gdr_buffer);
+    close_ipc_peer_mappings();
+    destroy_qps();
+    if (mr) {
+        ibv_dereg_mr(mr);
+        mr = nullptr;
     }
-    cudaFree(raddrs);
-    cudaFree(rkeys);
-    cudaFree(qp_devctxs);
-    if (nvlink_available) cudaFree(nvlink_available);
-    if (ipc_peer_ptrs) cudaFree(ipc_peer_ptrs);
+    free_graph_stable_cuda(gdr_buffer);
+    free_graph_stable_cuda(raddrs);
+    free_graph_stable_cuda(rkeys);
+    free_graph_stable_cuda(qp_devctxs);
+    free_graph_stable_cuda(nvlink_available);
+    free_graph_stable_cuda(ipc_peer_ptrs);
+    free_graph_stable_cuda(workspace);
     if (ipc_peer_ptrs_host) {
-        // Close IPC handles
-        for (int i = 0; i < num_ranks; ++i) {
-            if (ipc_peer_ptrs_host[i] != nullptr &&
-                ipc_peer_ptrs_host[i] != gdr_buffer) {
-                cudaIpcCloseMemHandle(ipc_peer_ptrs_host[i]);
-            }
-        }
         cudaFreeHost(ipc_peer_ptrs_host);
     }
 }
@@ -582,7 +604,7 @@ int MooncakeEpBuffer::init_ibgda() {
         };
         cudaMemcpy(qp_devctxs + i * sizeof(mlx5gda_qp_devctx), &qp_devctx,
                    sizeof(mlx5gda_qp_devctx), cudaMemcpyHostToDevice);
-        qps.push_back(qp);
+        qps[i] = qp;
     }
     return 0;
 }
@@ -595,6 +617,7 @@ void MooncakeEpBuffer::record_graph_stable_pointers() {
         {"qp_devctxs", reinterpret_cast<uintptr_t>(qp_devctxs)},
         {"nvlink_available", reinterpret_cast<uintptr_t>(nvlink_available)},
         {"ipc_peer_ptrs", reinterpret_cast<uintptr_t>(ipc_peer_ptrs)},
+        {"workspace", reinterpret_cast<uintptr_t>(workspace)},
     };
 }
 
@@ -606,6 +629,7 @@ bool MooncakeEpBuffer::validate_graph_stable_pointers() const {
         {"qp_devctxs", reinterpret_cast<uintptr_t>(qp_devctxs)},
         {"nvlink_available", reinterpret_cast<uintptr_t>(nvlink_available)},
         {"ipc_peer_ptrs", reinterpret_cast<uintptr_t>(ipc_peer_ptrs)},
+        {"workspace", reinterpret_cast<uintptr_t>(workspace)},
     };
     for (const auto& [name, ptr] : graph_stable_ptrs_) {
         auto it = current.find(name);
@@ -626,6 +650,85 @@ bool MooncakeEpBuffer::validate_graph_stable_pointers() const {
     return true;
 }
 
+void MooncakeEpBuffer::close_ipc_peer_mappings() {
+    if (!ipc_peer_ptrs_host) return;
+    for (int i = 0; i < num_ranks; ++i) {
+        if (!use_fabric_mem_ && ipc_peer_ptrs_host[i] != nullptr &&
+            ipc_peer_ptrs_host[i] != gdr_buffer) {
+            cudaIpcCloseMemHandle(ipc_peer_ptrs_host[i]);
+        }
+        ipc_peer_ptrs_host[i] = (i == rank) ? gdr_buffer : nullptr;
+    }
+    p2p_ipc_all_enabled_ = false;
+}
+
+void MooncakeEpBuffer::zero_device_peer_metadata() {
+    CUDA_CHECK(cudaMemset(raddrs, 0, num_ranks * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMemset(rkeys, 0, num_ranks * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMemset(qp_devctxs, 0,
+                          USE_QP_COUNT * sizeof(mlx5gda_qp_devctx)));
+    CUDA_CHECK(cudaMemset(nvlink_available, 0, num_ranks * sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(ipc_peer_ptrs, 0, num_ranks * sizeof(void*)));
+}
+
+void MooncakeEpBuffer::destroy_qps() {
+    for (auto& qp : qps) {
+        if (qp) {
+            mlx5gda_destroy_qp(ctrl_buf_heap, qp);
+            qp = nullptr;
+        }
+    }
+}
+
+bool MooncakeEpBuffer::refresh_local_mr() {
+    if (ibgda_disabled_) {
+        return false;
+    }
+    if (mr) {
+        return true;
+    }
+    mr = ibv_reg_mr(pd, gdr_buffer, num_ep_buffer_bytes,
+                    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
+                        IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC);
+    if (!mr) {
+        perror("Failed to re-register EP MR");
+        ibgda_disabled_ = true;
+        return false;
+    }
+    return true;
+}
+
+bool MooncakeEpBuffer::refresh_local_gid() {
+    if (!qps.empty() && qps[0]) {
+        is_roce_ = qps[0]->port_attr.link_layer == IBV_LINK_LAYER_ETHERNET;
+        if (!is_roce_) {
+            return true;
+        }
+    }
+    if (!pd || !pd->context) {
+        LOG(ERROR) << "[EP] Cannot refresh GID before PD/context init";
+        return false;
+    }
+    const uint8_t port_num = 1;
+    ibv_port_attr port_attr;
+    if (ibv_query_port(pd->context, port_num, &port_attr)) {
+        perror("Failed to refresh port attributes");
+        return false;
+    }
+    int gid_index = findBestGidIndex(pd->context, port_num, port_attr);
+    if (gid_index < 0) {
+        LOG(ERROR) << "[EP] Failed to refresh suitable GID index on "
+                   << device_name;
+        return false;
+    }
+    gid_index_ = gid_index;
+    if (ibv_query_gid(pd->context, port_num, gid_index_, &gid)) {
+        perror("Failed to refresh gid");
+        return false;
+    }
+    return true;
+}
+
 int MooncakeEpBuffer::checkpoint_pause_graph_stable() {
     CUDA_CHECK(cudaStreamSynchronize(comm_stream.stream()));
     if (checkpoint_graph_stable_paused_) {
@@ -635,11 +738,24 @@ int MooncakeEpBuffer::checkpoint_pause_graph_stable() {
     if (!validate_graph_stable_pointers()) {
         return -1;
     }
+    close_ipc_peer_mappings();
+    destroy_qps();
+    if (mr) {
+        ibv_dereg_mr(mr);
+        mr = nullptr;
+    }
+    zero_device_peer_metadata();
+    CUDA_CHECK(cudaStreamSynchronize(comm_stream.stream()));
+    local_qpns_refreshed_after_pause_ = false;
+    rdma_metadata_synced_after_pause_ = false;
+    nvlink_metadata_synced_after_pause_ = false;
     checkpoint_graph_stable_paused_ = true;
     LOG(INFO) << "[EP] Graph-stable checkpoint paused. Device pointer "
-                 "invariants recorded; caller must refresh QP/MR/GID/IPC "
-                 "metadata via update_local_qpns(), sync_ib()/sync_roce(), "
-                 "and sync_nvlink_ipc_handles() before resume.";
+                 "invariants recorded, QPs/MR/IPCs were invalidated, and "
+                 "device peer metadata arrays were zeroed. Caller must "
+                 "refresh QP/MR/GID/IPC metadata via update_local_qpns(), "
+                 "sync_ib()/sync_roce(), and sync_nvlink_ipc_handles() "
+                 "before resume.";
     return 0;
 }
 
@@ -659,6 +775,20 @@ int MooncakeEpBuffer::checkpoint_resume_graph_stable(
     if (!validate_graph_stable_pointers()) {
         return -1;
     }
+    if (!ibgda_disabled_ &&
+        (!local_qpns_refreshed_after_pause_ ||
+         !rdma_metadata_synced_after_pause_)) {
+        LOG(ERROR) << "[EP] Graph-stable checkpoint resume requires freshly "
+                      "recreated local QPs/MR and synced remote RDMA "
+                      "metadata before unpausing.";
+        return -1;
+    }
+    if (ibgda_disabled_ &&
+        (!nvlink_metadata_synced_after_pause_ || !p2p_ipc_all_enabled_)) {
+        LOG(ERROR) << "[EP] Graph-stable checkpoint resume requires freshly "
+                      "synced NVLink IPC metadata when IBGDA is disabled.";
+        return -1;
+    }
     checkpoint_graph_stable_paused_ = false;
     LOG(INFO) << "[EP] Graph-stable checkpoint resumed with stable device "
                  "pointer invariants. Fresh metadata marker: "
@@ -667,12 +797,16 @@ int MooncakeEpBuffer::checkpoint_resume_graph_stable(
 }
 
 void MooncakeEpBuffer::update_local_qpns() {
-    for (int i = 0; i < USE_QP_COUNT; ++i) {
-        if (qps[i]) {
-            mlx5gda_destroy_qp(ctrl_buf_heap, qps[i]);
-            qps[i] = nullptr;
-        }
+    if (ibgda_disabled_) {
+        LOG(WARNING) << "[EP] Skipping QP refresh because IBGDA is disabled";
+        return;
     }
+    if (!refresh_local_mr()) return;
+    if (!refresh_local_gid()) {
+        ibgda_disabled_ = true;
+        return;
+    }
+    destroy_qps();
 
     for (int i = 0; i < USE_QP_COUNT; ++i) {
         mlx5gda_qp* qp =
@@ -705,6 +839,7 @@ void MooncakeEpBuffer::update_local_qpns() {
                    sizeof(mlx5gda_qp_devctx), cudaMemcpyHostToDevice);
         qps[i] = qp;
     }
+    local_qpns_refreshed_after_pause_ = checkpoint_graph_stable_paused_;
 }
 
 void MooncakeEpBuffer::sync_ib(const std::vector<int64_t>& remote_addrs,
@@ -712,9 +847,16 @@ void MooncakeEpBuffer::sync_ib(const std::vector<int64_t>& remote_addrs,
                                const std::vector<int32_t>& remote_qpns,
                                const std::vector<int32_t>& remote_lids,
                                const std::vector<int>& active_ranks_mask) {
+    EP_HOST_ASSERT(remote_addrs.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(remote_keys.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(remote_qpns.size() >= static_cast<size_t>(USE_QP_COUNT));
+    EP_HOST_ASSERT(remote_lids.size() >= static_cast<size_t>(USE_QP_COUNT));
+    EP_HOST_ASSERT(active_ranks_mask.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(mr != nullptr);
     for (int i = 0; i < USE_QP_COUNT; ++i) {
         int peer_rank = i * num_ranks / USE_QP_COUNT;
         if (active_ranks_mask[peer_rank] == 0) continue;
+        EP_HOST_ASSERT(qps[i] != nullptr);
         ibv_ah_attr ah_attr = {
             .dlid = (uint16_t)remote_lids[i],
             .port_num = 0,
@@ -739,6 +881,30 @@ void MooncakeEpBuffer::sync_ib(const std::vector<int64_t>& remote_addrs,
         cudaMemcpy(rkeys + i * sizeof(uint32_t), &rkey, sizeof(uint32_t),
                    cudaMemcpyHostToDevice);
     }
+    if (use_fabric_mem_) {
+        std::vector<int32_t> nvlink_array(num_ranks, 0);
+        p2p_ipc_all_enabled_ = true;
+        for (int i = 0; i < num_ranks; ++i) {
+            if (active_ranks_mask[i] == 0) continue;
+            ipc_peer_ptrs_host[i] =
+                i == rank ? gdr_buffer : reinterpret_cast<void*>(
+                                            static_cast<uintptr_t>(
+                                                remote_addrs[i]));
+            if (!ipc_peer_ptrs_host[i]) {
+                p2p_ipc_all_enabled_ = false;
+                continue;
+            }
+            nvlink_array[i] = 1;
+        }
+        CUDA_CHECK(cudaMemcpy(nvlink_available, nvlink_array.data(),
+                              num_ranks * sizeof(int32_t),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ipc_peer_ptrs, ipc_peer_ptrs_host,
+                              num_ranks * sizeof(void*),
+                              cudaMemcpyHostToDevice));
+        nvlink_metadata_synced_after_pause_ = checkpoint_graph_stable_paused_;
+    }
+    rdma_metadata_synced_after_pause_ = checkpoint_graph_stable_paused_;
 }
 
 void MooncakeEpBuffer::sync_roce(const std::vector<int64_t>& remote_addrs,
@@ -747,9 +913,17 @@ void MooncakeEpBuffer::sync_roce(const std::vector<int64_t>& remote_addrs,
                                  const std::vector<int64_t>& subnet_prefixes,
                                  const std::vector<int64_t>& interface_ids,
                                  const std::vector<int>& active_ranks_mask) {
+    EP_HOST_ASSERT(remote_addrs.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(remote_keys.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(remote_qpns.size() >= static_cast<size_t>(USE_QP_COUNT));
+    EP_HOST_ASSERT(subnet_prefixes.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(interface_ids.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(active_ranks_mask.size() >= static_cast<size_t>(num_ranks));
+    EP_HOST_ASSERT(mr != nullptr);
     for (int i = 0; i < USE_QP_COUNT; ++i) {
         int peer_rank = i * num_ranks / USE_QP_COUNT;
         if (active_ranks_mask[peer_rank] == 0) continue;
+        EP_HOST_ASSERT(qps[i] != nullptr);
         ibv_gid remote_gid{};
         remote_gid.global.subnet_prefix = subnet_prefixes[peer_rank];
         remote_gid.global.interface_id = interface_ids[peer_rank];
@@ -781,6 +955,30 @@ void MooncakeEpBuffer::sync_roce(const std::vector<int64_t>& remote_addrs,
         cudaMemcpy(rkeys + i * sizeof(uint32_t), &rkey, sizeof(uint32_t),
                    cudaMemcpyHostToDevice);
     }
+    if (use_fabric_mem_) {
+        std::vector<int32_t> nvlink_array(num_ranks, 0);
+        p2p_ipc_all_enabled_ = true;
+        for (int i = 0; i < num_ranks; ++i) {
+            if (active_ranks_mask[i] == 0) continue;
+            ipc_peer_ptrs_host[i] =
+                i == rank ? gdr_buffer : reinterpret_cast<void*>(
+                                            static_cast<uintptr_t>(
+                                                remote_addrs[i]));
+            if (!ipc_peer_ptrs_host[i]) {
+                p2p_ipc_all_enabled_ = false;
+                continue;
+            }
+            nvlink_array[i] = 1;
+        }
+        CUDA_CHECK(cudaMemcpy(nvlink_available, nvlink_array.data(),
+                              num_ranks * sizeof(int32_t),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ipc_peer_ptrs, ipc_peer_ptrs_host,
+                              num_ranks * sizeof(void*),
+                              cudaMemcpyHostToDevice));
+        nvlink_metadata_synced_after_pause_ = checkpoint_graph_stable_paused_;
+    }
+    rdma_metadata_synced_after_pause_ = checkpoint_graph_stable_paused_;
 }
 
 std::vector<int32_t> MooncakeEpBuffer::get_ipc_handle() {
@@ -804,6 +1002,10 @@ std::vector<int32_t> MooncakeEpBuffer::get_ipc_handle() {
 void MooncakeEpBuffer::sync_nvlink_ipc_handles(
     const std::vector<std::vector<int32_t>>& remote_handles,
     const std::vector<int>& active_ranks_mask) {
+    EP_HOST_ASSERT(active_ranks_mask.size() >= static_cast<size_t>(num_ranks));
+    if (!use_fabric_mem_) {
+        close_ipc_peer_mappings();
+    }
     int device_count = 0;
     CUDA_CHECK(cudaGetDeviceCount(&device_count));
 
@@ -811,20 +1013,23 @@ void MooncakeEpBuffer::sync_nvlink_ipc_handles(
     nvlink_array[rank] = 1;
 
     if (use_fabric_mem_) {
-        // MNNVL: fabric addresses are globally visible across the clique.
-        // All ranks can directly access each other's gdr_buffer without IPC
-        // handle exchange — cuMemSetAccess already granted all devices
-        // read/write access during allocation.
+        // MNNVL fabric memory does not use cudaIpc handles. sync_ib() or
+        // sync_roce() must already have populated ipc_peer_ptrs_host with the
+        // freshly exchanged peer fabric virtual addresses.
+        p2p_ipc_all_enabled_ = true;
         for (int i = 0; i < num_ranks; ++i) {
             if (active_ranks_mask[i] == 0) continue;
+            if (i == rank) ipc_peer_ptrs_host[i] = gdr_buffer;
+            if (ipc_peer_ptrs_host[i] == nullptr) {
+                p2p_ipc_all_enabled_ = false;
+                LOG(WARNING) << "[EP] Missing fresh fabric pointer for rank "
+                             << i
+                             << ". Run sync_ib() or sync_roce() with fresh "
+                                "remote addresses before resume.";
+                continue;
+            }
             nvlink_array[i] = 1;
-            // Each rank's gdr_buffer is directly accessible; the remote
-            // addresses will be exchanged via the RDMA address sync path
-            // (sync_ib / sync_roce) or via a separate fabric address exchange.
-            // For local rank, point to our own buffer.
-            ipc_peer_ptrs_host[i] = (i == rank) ? gdr_buffer : nullptr;
         }
-        p2p_ipc_all_enabled_ = true;
         LOG(INFO) << "[EP] Fabric memory enabled, skipping IPC handle exchange";
     } else {
         // Non-MNNVL: use cudaIpc for intra-node P2P (original path)
@@ -912,6 +1117,7 @@ void MooncakeEpBuffer::sync_nvlink_ipc_handles(
                           num_ranks * sizeof(int32_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ipc_peer_ptrs, ipc_peer_ptrs_host,
                           num_ranks * sizeof(void*), cudaMemcpyHostToDevice));
+    nvlink_metadata_synced_after_pause_ = checkpoint_graph_stable_paused_;
 }
 
 }  // namespace mooncake

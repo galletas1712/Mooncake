@@ -257,6 +257,9 @@ static TransferEngine::GraphStableCheckpointOptions graphStableOptionsFromC(
     if (!options) return native_options;
     native_options.require_vmm = options->require_vmm != 0;
     native_options.preserve_local_va = options->preserve_local_va != 0;
+    if (options->drain_timeout_ms != 0) {
+        native_options.drain_timeout_ms = options->drain_timeout_ms;
+    }
     if (options->fresh_bootstrap) {
         native_options.fresh_bootstrap = options->fresh_bootstrap;
     }

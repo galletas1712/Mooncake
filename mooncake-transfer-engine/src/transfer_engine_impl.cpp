@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -92,6 +93,129 @@ static bool setFilesLimit() {
         return false;
     }
     return true;
+}
+
+int TransferEngineImpl::drainActiveBatchesLocked(
+    std::unique_lock<std::shared_mutex>& lock,
+    const GraphStableCheckpointOptions& options) {
+    if (active_batch_ids_.empty()) {
+        return 0;
+    }
+
+    if (options.drain_timeout_ms == 0) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint pause requires a "
+                      "quiesced TransferEngine; "
+                   << active_batch_ids_.size() << " batch(es) are active";
+        return ERR_BATCH_BUSY;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(
+                              options.drain_timeout_ms);
+    while (!active_batch_ids_.empty()) {
+        if (active_batch_cv_.wait_until(lock, deadline) ==
+            std::cv_status::timeout) {
+            break;
+        }
+    }
+    if (!active_batch_ids_.empty()) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint pause failed to drain "
+                   << active_batch_ids_.size() << " active batch(es) within "
+                   << options.drain_timeout_ms
+                   << " ms. Callers must complete and free/check all transfer "
+                      "batches before checkpoint.";
+        return ERR_BATCH_BUSY;
+    }
+    return 0;
+}
+
+int TransferEngineImpl::releaseTransportRegistrationsLocked() {
+    if (checkpoint_transport_registrations_released_) {
+        return 0;
+    }
+
+    struct ReleasedRegistration {
+        Transport* transport;
+        MemoryRegion region;
+    };
+    std::vector<ReleasedRegistration> released;
+    for (const auto& [_, region] : local_memory_regions_) {
+        for (auto& transport : multi_transports_->listTransports()) {
+            int rc = transport->unregisterLocalMemory(region.addr, false);
+            if (rc) {
+                LOG(ERROR)
+                    << "Mooncake graph-stable checkpoint pause failed to "
+                       "release local transport registration addr="
+                    << region.addr << " length=" << region.length
+                    << " rc=" << rc;
+                for (auto& rollback : released) {
+                    (void)rollback.transport->registerLocalMemory(
+                        rollback.region.addr, rollback.region.length,
+                        rollback.region.location,
+                        rollback.region.remote_accessible, false);
+                }
+                (void)metadata_->updateLocalSegmentDesc();
+                return rc;
+            }
+            released.push_back({transport, region});
+        }
+    }
+    checkpoint_transport_registrations_released_ = true;
+    return 0;
+}
+
+int TransferEngineImpl::restoreTransportRegistrationsLocked() {
+    if (!checkpoint_transport_registrations_released_) {
+        return metadata_->updateLocalSegmentDesc();
+    }
+
+    struct RestoredRegistration {
+        Transport* transport;
+        void* addr;
+    };
+    std::vector<RestoredRegistration> restored;
+    for (const auto& [_, region] : local_memory_regions_) {
+        for (auto& transport : multi_transports_->listTransports()) {
+            int rc = transport->registerLocalMemory(
+                region.addr, region.length, region.location,
+                region.remote_accessible, false);
+            if (rc) {
+                LOG(ERROR)
+                    << "Mooncake graph-stable checkpoint resume failed to "
+                       "re-register local buffer addr="
+                    << region.addr << " length=" << region.length
+                    << " rc=" << rc;
+                for (auto& rollback : restored) {
+                    (void)rollback.transport->unregisterLocalMemory(
+                        rollback.addr, false);
+                }
+                return rc;
+            }
+            restored.push_back({transport, region.addr});
+        }
+    }
+    checkpoint_transport_registrations_released_ = false;
+    int rc = metadata_->updateLocalSegmentDesc();
+    if (rc) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint resume failed to "
+                      "publish refreshed local memory metadata rc="
+                   << rc;
+        return rc;
+    }
+    return 0;
+}
+
+int TransferEngineImpl::clearRemoteSegmentCacheLocked() {
+    if (!metadata_) {
+        return 0;
+    }
+    int rc = metadata_->removeAllRemoteSegments();
+    if (rc) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint failed to invalidate "
+                      "remote segment cache rc="
+                   << rc;
+    }
+    return rc;
 }
 
 static std::string loadTopologyJsonFile(const std::string& path) {
@@ -573,7 +697,10 @@ Status TransferEngineImpl::CheckSegmentStatus(SegmentID sid) {
 }
 
 int TransferEngineImpl::closeSegment(Transport::SegmentHandle handle) {
-    return 0;
+    if (handle == LOCAL_SEGMENT_ID) {
+        return 0;
+    }
+    return metadata_->removeRemoteSegment(handle);
 }
 
 int TransferEngineImpl::checkpointPauseGraphStable() {
@@ -590,23 +717,44 @@ int TransferEngineImpl::checkpointPauseGraphStable(
     if (checkpoint_graph_stable_paused_.load()) {
         return 0;
     }
-    if (!active_batch_ids_.empty()) {
-        LOG(ERROR) << "Mooncake graph-stable checkpoint pause requires a "
-                      "quiesced TransferEngine; "
-                   << active_batch_ids_.size() << " batch(es) are active";
-        return ERR_BATCH_BUSY;
+    checkpoint_quiescing_.store(true);
+    int rc = drainActiveBatchesLocked(lock, options);
+    if (rc) {
+        checkpoint_quiescing_.store(false);
+        return rc;
     }
     if (!graphStableVmmPreconditionsMetLocked(options)) {
+        checkpoint_quiescing_.store(false);
         return ERR_INVALID_ARGUMENT;
     }
 
+    rc = releaseTransportRegistrationsLocked();
+    if (rc) {
+        checkpoint_quiescing_.store(false);
+        return rc;
+    }
+    rc = clearRemoteSegmentCacheLocked();
+    if (rc) {
+        int restore_rc = restoreTransportRegistrationsLocked();
+        if (restore_rc) {
+            LOG(ERROR)
+                << "Mooncake graph-stable checkpoint pause failed to restore "
+                   "transport registrations after remote cache invalidation "
+                   "failure rc="
+                << restore_rc;
+        }
+        checkpoint_quiescing_.store(false);
+        return rc;
+    }
     checkpoint_graph_stable_paused_.store(true);
+    checkpoint_quiescing_.store(false);
     ++checkpoint_generation_;
-    LOG(INFO) << "Mooncake graph-stable checkpoint paused. Local registered "
-                 "virtual addresses are retained; new submissions are "
-                 "blocked until checkpointResumeGraphStable() succeeds. "
-                 "Remote bootstrap/segment metadata must be refreshed after "
-                 "resume before transfers are posted.";
+    LOG(INFO) << "Mooncake graph-stable checkpoint paused after draining active "
+                 "transfers. Local virtual addresses and descriptors are "
+                 "retained, transport registrations were released, and remote "
+                 "segment cache state was invalidated. New submissions are "
+                 "blocked until checkpointResumeGraphStable() succeeds with "
+                 "fresh bootstrap/metadata.";
     return 0;
 }
 
@@ -627,10 +775,28 @@ int TransferEngineImpl::checkpointResumeGraphStable(
         return ERR_INVALID_ARGUMENT;
     }
 
+    int rc = metadata_->rePublishRpcMetaEntry(local_server_name_);
+    if (rc) {
+        LOG(ERROR) << "Mooncake graph-stable checkpoint resume failed to "
+                      "re-publish local RPC metadata for "
+                   << local_server_name_ << ": " << rc;
+        return rc;
+    }
+    rc = restoreTransportRegistrationsLocked();
+    if (rc) {
+        return rc;
+    }
+    rc = clearRemoteSegmentCacheLocked();
+    if (rc) {
+        return rc;
+    }
+
     checkpoint_graph_stable_paused_.store(false);
     ++checkpoint_generation_;
     LOG(INFO) << "Mooncake graph-stable checkpoint resumed with fresh "
-                 "bootstrap/metadata markers. Callers must reopen/sync remote "
+                 "bootstrap/metadata markers. Local buffers were "
+                 "re-registered at retained virtual addresses; remote segment "
+                 "IDs remain invalidated and callers must reopen/sync remote "
                  "segments and refresh graph-visible indirection buffers "
                  "before replaying captured CUDA graphs.";
     return 0;
@@ -654,7 +820,14 @@ int TransferEngineImpl::registerLocalMemory(void* addr, size_t length,
                                             const std::string& location,
                                             bool remote_accessible,
                                             bool update_metadata) {
-    if (checkOverlap(addr, length)) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_quiescing_.load() ||
+        checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Transfer Engine cannot register memory while "
+                      "graph-stable checkpoint quiescing or paused";
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (hasOverlapLocked(reinterpret_cast<uintptr_t>(addr), length)) {
         LOG(ERROR)
             << "Transfer Engine does not support overlapped memory region";
         return ERR_ADDRESS_OVERLAPPED;
@@ -670,19 +843,24 @@ int TransferEngineImpl::registerLocalMemory(void* addr, size_t length,
         if (ret < 0) return ret;
     }
 
-    std::unique_lock<std::shared_mutex> lock(mutex_);
     insertMemoryRegionLocked({addr, length, location, remote_accessible});
     return 0;
 }
 
 int TransferEngineImpl::unregisterLocalMemory(void* addr,
                                               bool update_metadata) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_quiescing_.load() ||
+        checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Transfer Engine cannot unregister memory while "
+                      "graph-stable checkpoint quiescing or paused";
+        return ERR_INVALID_ARGUMENT;
+    }
     for (auto& transport : multi_transports_->listTransports()) {
         int ret = transport->unregisterLocalMemory(addr, update_metadata);
         if (ret) return ret;
     }
 
-    std::unique_lock<std::shared_mutex> lock(mutex_);
     eraseMemoryRegionLocked(addr);
     return 0;
 }
@@ -693,10 +871,18 @@ int TransferEngineImpl::unregisterLocalMemory(void* addr,
 int TransferEngineImpl::mp_registerLocalMemory(
     std::unordered_map<std::string, std::vector<RegisteredBuffer>>&
         buffer_map) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_quiescing_.load() ||
+        checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Transfer Engine cannot register multi-protocol memory "
+                      "while graph-stable checkpoint quiescing or paused";
+        return ERR_INVALID_ARGUMENT;
+    }
     // ========== Phase 1: Pre-check ==========
     for (const auto& entry : buffer_map) {
         for (const auto& buffer : entry.second) {
-            if (checkOverlap(buffer.addr, buffer.length)) {
+            if (hasOverlapLocked(reinterpret_cast<uintptr_t>(buffer.addr),
+                                 buffer.length)) {
                 LOG(ERROR) << "Transfer Engine does not support overlapped "
                               "memory region";
                 return ERR_ADDRESS_OVERLAPPED;
@@ -754,13 +940,10 @@ int TransferEngineImpl::mp_registerLocalMemory(
     }
 
     // ========== Phase 5: Commit to system state ==========
-    {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-        for (const auto& record : success_records) {
-            insertMemoryRegionLocked({record.addr, record.length,
-                                      record.location,
-                                      record.remote_accessible});
-        }
+    for (const auto& record : success_records) {
+        insertMemoryRegionLocked(
+            {record.addr, record.length, record.location,
+             record.remote_accessible});
     }
 
     return 0;
@@ -780,6 +963,14 @@ void TransferEngineImpl::rollbackAllRegistrations(
 int TransferEngineImpl::mp_unregisterLocalMemory(
     std::unordered_map<std::string, std::vector<RegisteredBuffer>>&
         buffer_map) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_quiescing_.load() ||
+        checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Transfer Engine cannot unregister multi-protocol "
+                      "memory while graph-stable checkpoint quiescing or "
+                      "paused";
+        return ERR_INVALID_ARGUMENT;
+    }
     for (const auto& buffer_entry : buffer_map) {
         const std::string& protocol = buffer_entry.first;
         const std::vector<RegisteredBuffer>& buffer_list = buffer_entry.second;
@@ -798,7 +989,6 @@ int TransferEngineImpl::mp_unregisterLocalMemory(
             }
         }
 
-        std::unique_lock<std::shared_mutex> lock(mutex_);
         for (const auto& buffer : buffer_list) {
             eraseMemoryRegionLocked(buffer.addr);
         }
@@ -809,8 +999,16 @@ int TransferEngineImpl::mp_unregisterLocalMemory(
 
 int TransferEngineImpl::registerLocalMemoryBatch(
     const std::vector<BufferEntry>& buffer_list, const std::string& location) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_quiescing_.load() ||
+        checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Transfer Engine cannot register memory batch while "
+                      "graph-stable checkpoint quiescing or paused";
+        return ERR_INVALID_ARGUMENT;
+    }
     for (auto& buffer : buffer_list) {
-        if (checkOverlap(buffer.addr, buffer.length)) {
+        if (hasOverlapLocked(reinterpret_cast<uintptr_t>(buffer.addr),
+                             buffer.length)) {
             LOG(ERROR)
                 << "Transfer Engine does not support overlapped memory region";
             return ERR_ADDRESS_OVERLAPPED;
@@ -821,7 +1019,6 @@ int TransferEngineImpl::registerLocalMemoryBatch(
         if (ret < 0) return ret;
     }
 
-    std::unique_lock<std::shared_mutex> lock(mutex_);
     for (auto& buffer : buffer_list) {
         insertMemoryRegionLocked({buffer.addr, buffer.length, location, true});
     }
@@ -830,12 +1027,18 @@ int TransferEngineImpl::registerLocalMemoryBatch(
 
 int TransferEngineImpl::unregisterLocalMemoryBatch(
     const std::vector<void*>& addr_list) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (checkpoint_quiescing_.load() ||
+        checkpoint_graph_stable_paused_.load()) {
+        LOG(ERROR) << "Transfer Engine cannot unregister memory batch while "
+                      "graph-stable checkpoint quiescing or paused";
+        return ERR_INVALID_ARGUMENT;
+    }
     for (auto transport : multi_transports_->listTransports()) {
         int ret = transport->unregisterLocalMemoryBatch(addr_list);
         if (ret < 0) return ret;
     }
 
-    std::unique_lock<std::shared_mutex> lock(mutex_);
     for (auto& addr : addr_list) {
         eraseMemoryRegionLocked(addr);
     }

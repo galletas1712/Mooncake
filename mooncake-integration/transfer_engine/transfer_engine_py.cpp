@@ -1014,11 +1014,13 @@ int TransferEnginePy::warmupEfaSegment(const std::string& segment_name) {
 }
 
 int TransferEnginePy::checkpointPauseGraphStable(bool require_vmm,
-                                                 bool preserve_local_va) {
+                                                 bool preserve_local_va,
+                                                 uint64_t drain_timeout_ms) {
     pybind11::gil_scoped_release release;
     TransferEngine::GraphStableCheckpointOptions options;
     options.require_vmm = require_vmm;
     options.preserve_local_va = preserve_local_va;
+    options.drain_timeout_ms = drain_timeout_ms;
     int ret = engine_->checkpointPauseGraphStable(options);
     if (ret == 0) {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -1254,7 +1256,8 @@ PYBIND11_MODULE(engine, m) {
             .def("checkpoint_pause_graph_stable",
                  &TransferEnginePy::checkpointPauseGraphStable,
                  py::arg("require_vmm") = true,
-                 py::arg("preserve_local_va") = true)
+                 py::arg("preserve_local_va") = true,
+                 py::arg("drain_timeout_ms") = 5000)
             .def("checkpoint_resume_graph_stable",
                  &TransferEnginePy::checkpointResumeGraphStable,
                  py::arg("fresh_bootstrap") = "",

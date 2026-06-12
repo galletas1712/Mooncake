@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -60,6 +61,7 @@ using GraphStableCheckpointOptions =
 
 inline bool isTerminalTransferStatus(TransferStatusEnum status) {
     return status == TransferStatusEnum::COMPLETED ||
+           status == TransferStatusEnum::INVALID ||
            status == TransferStatusEnum::FAILED ||
            status == TransferStatusEnum::CANCELED ||
            status == TransferStatusEnum::TIMEOUT;
@@ -131,9 +133,11 @@ class TransferEngineImpl {
                           const std::vector<TransferRequest>& entries) {
         {
             std::unique_lock<std::shared_mutex> lock(mutex_);
-            if (checkpoint_graph_stable_paused_.load()) {
+            if (checkpoint_quiescing_.load() ||
+                checkpoint_graph_stable_paused_.load()) {
                 return Status::InvalidArgument(
-                    "TransferEngine is graph-stable checkpoint paused");
+                    "TransferEngine is graph-stable checkpoint quiescing or "
+                    "paused");
             }
             active_batch_ids_.insert(batch_id);
         }
@@ -161,9 +165,11 @@ class TransferEngineImpl {
         }
         {
             std::unique_lock<std::shared_mutex> lock(mutex_);
-            if (checkpoint_graph_stable_paused_.load()) {
+            if (checkpoint_quiescing_.load() ||
+                checkpoint_graph_stable_paused_.load()) {
                 return Status::InvalidArgument(
-                    "TransferEngine is graph-stable checkpoint paused");
+                    "TransferEngine is graph-stable checkpoint quiescing or "
+                    "paused");
             }
             active_batch_ids_.insert(batch_id);
         }
@@ -209,9 +215,11 @@ class TransferEngineImpl {
                              std::string& proto) {
         {
             std::unique_lock<std::shared_mutex> lock(mutex_);
-            if (checkpoint_graph_stable_paused_.load()) {
+            if (checkpoint_quiescing_.load() ||
+                checkpoint_graph_stable_paused_.load()) {
                 return Status::InvalidArgument(
-                    "TransferEngine is graph-stable checkpoint paused");
+                    "TransferEngine is graph-stable checkpoint quiescing or "
+                    "paused");
             }
             active_batch_ids_.insert(batch_id);
         }
@@ -240,9 +248,11 @@ class TransferEngineImpl {
         }
         {
             std::unique_lock<std::shared_mutex> lock(mutex_);
-            if (checkpoint_graph_stable_paused_.load()) {
+            if (checkpoint_quiescing_.load() ||
+                checkpoint_graph_stable_paused_.load()) {
                 return Status::InvalidArgument(
-                    "TransferEngine is graph-stable checkpoint paused");
+                    "TransferEngine is graph-stable checkpoint quiescing or "
+                    "paused");
             }
             active_batch_ids_.insert(batch_id);
         }
@@ -280,6 +290,10 @@ class TransferEngineImpl {
     int unregisterLocalMemoryBatch(const std::vector<void*>& addr_list);
 
     BatchID allocateBatchID(size_t batch_size) {
+        if (checkpoint_quiescing_.load() ||
+            checkpoint_graph_stable_paused_.load()) {
+            return INVALID_BATCH_ID;
+        }
         return multi_transports_->allocateBatchID(batch_size);
     }
 
@@ -470,19 +484,34 @@ class TransferEngineImpl {
     bool graphStableVmmPreconditionsMetLocked(
         const GraphStableCheckpointOptions& options) const;
 
+    int drainActiveBatchesLocked(std::unique_lock<std::shared_mutex>& lock,
+                                 const GraphStableCheckpointOptions& options);
+
+    int releaseTransportRegistrationsLocked();
+
+    int restoreTransportRegistrationsLocked();
+
+    int clearRemoteSegmentCacheLocked();
+
     void removeActiveBatch(BatchID batch_id) {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-        active_batch_ids_.erase(batch_id);
+        {
+            std::unique_lock<std::shared_mutex> lock(mutex_);
+            active_batch_ids_.erase(batch_id);
+        }
+        active_batch_cv_.notify_all();
     }
 
     std::shared_ptr<TransferMetadata> metadata_;
     std::string local_server_name_;
     std::shared_ptr<MultiTransport> multi_transports_;
     std::shared_mutex mutex_;
+    std::condition_variable_any active_batch_cv_;
     MemoryRegionMap local_memory_regions_;
     std::set<BatchID> active_batch_ids_;
+    std::atomic<bool> checkpoint_quiescing_{false};
     std::atomic<bool> checkpoint_graph_stable_paused_{false};
     uint64_t checkpoint_generation_ = 0;
+    bool checkpoint_transport_registrations_released_ = false;
     std::shared_ptr<Topology> local_topology_;
 
     RWSpinlock send_notifies_lock_;

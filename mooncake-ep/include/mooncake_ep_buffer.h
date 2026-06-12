@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <transport/device/ibgda/memheap.h>
 #include <transport/device/ibgda/mlx5gda.h>
 #include <mooncake_ep_api.cuh>
@@ -91,15 +92,18 @@ struct MooncakeEpBuffer {
     int gid_index_ = -1;  // Dynamically discovered GID index
     int USE_QP_COUNT = MAX_QP_COUNT;
 
-    mlx5dv_devx_umem* ctrl_buf_umem;
-    ibv_pd* pd;
-    mlx5dv_pd mpd;
-    memheap* ctrl_buf_heap;
+    mlx5dv_devx_umem* ctrl_buf_umem = nullptr;
+    ibv_pd* pd = nullptr;
+    mlx5dv_pd mpd{};
+    memheap* ctrl_buf_heap = nullptr;
 
     // Fabric memory (MNNVL)
     bool use_fabric_mem_ = false;
-    CUmemGenericAllocationHandle fabric_mem_handle_{};
-    size_t fabric_alloc_size_ = 0;
+    struct VmmAllocation {
+        CUmemGenericAllocationHandle handle{};
+        size_t mapped_size = 0;
+    };
+    std::unordered_map<void*, VmmAllocation> vmm_allocations_;
 
     // NVLink P2P
     int32_t* nvlink_available = nullptr;
@@ -113,10 +117,21 @@ struct MooncakeEpBuffer {
     // Workspace
     void* workspace = nullptr;
     bool checkpoint_graph_stable_paused_ = false;
+    bool local_qpns_refreshed_after_pause_ = false;
+    bool rdma_metadata_synced_after_pause_ = false;
+    bool nvlink_metadata_synced_after_pause_ = false;
     std::unordered_map<std::string, uintptr_t> graph_stable_ptrs_;
 
+    void* allocate_graph_stable_cuda(size_t bytes, bool fabric_handle,
+                                     const char* name);
+    void free_graph_stable_cuda(void* ptr);
     void record_graph_stable_pointers();
     bool validate_graph_stable_pointers() const;
+    void close_ipc_peer_mappings();
+    void zero_device_peer_metadata();
+    void destroy_qps();
+    bool refresh_local_mr();
+    bool refresh_local_gid();
 
    public:
     MooncakeEpBuffer(int rank, int num_ranks, int64_t num_ep_buffer_bytes,
@@ -197,6 +212,7 @@ struct MooncakeEpBuffer {
                    const std::vector<int>& active_ranks_mask);
 
     std::tuple<int64_t, int32_t> get_mr_info() {
+        EP_HOST_ASSERT(mr != nullptr);
         return {(int64_t)mr->addr, (int32_t)mr->rkey};
     }
 
@@ -208,7 +224,7 @@ struct MooncakeEpBuffer {
     std::vector<int32_t> get_local_qpns() {
         std::vector<int32_t> local_qpns;
         for (int i = 0; i < USE_QP_COUNT; ++i) {
-            local_qpns.push_back((int32_t)qps[i]->qpn);
+            local_qpns.push_back(qps[i] ? (int32_t)qps[i]->qpn : 0);
         }
         return local_qpns;
     }
@@ -216,7 +232,7 @@ struct MooncakeEpBuffer {
     std::vector<int32_t> get_local_lids() {
         std::vector<int32_t> local_lids;
         for (int i = 0; i < USE_QP_COUNT; ++i) {
-            local_lids.push_back((int32_t)qps[i]->port_attr.lid);
+            local_lids.push_back(qps[i] ? (int32_t)qps[i]->port_attr.lid : 0);
         }
         return local_lids;
     }

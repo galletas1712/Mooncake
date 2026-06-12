@@ -187,6 +187,10 @@ class TransferMetadata {
 
     int removeLocalSegment(const std::string &segment_name);
 
+    int removeRemoteSegment(SegmentID segment_id);
+
+    int removeAllRemoteSegments();
+
     int addRpcMetaEntry(const std::string &server_name, RpcMetaDesc &desc);
 
     int removeRpcMetaEntry(const std::string &server_name);

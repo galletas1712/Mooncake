@@ -169,7 +169,8 @@ class TransferEnginePy {
     int warmupEfaSegment(const std::string &segment_name);
 
     int checkpointPauseGraphStable(bool require_vmm = true,
-                                   bool preserve_local_va = true);
+                                   bool preserve_local_va = true,
+                                   uint64_t drain_timeout_ms = 5000);
 
     int checkpointResumeGraphStable(const std::string &fresh_bootstrap = "",
                                     const std::string &fresh_metadata = "",

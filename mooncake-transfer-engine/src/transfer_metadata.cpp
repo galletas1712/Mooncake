@@ -1089,6 +1089,41 @@ int TransferMetadata::removeLocalSegment(const std::string &segment_name) {
     return 0;
 }
 
+int TransferMetadata::removeRemoteSegment(SegmentID segment_id) {
+    if (segment_id == LOCAL_SEGMENT_ID) {
+        return ERR_INVALID_ARGUMENT;
+    }
+    RWSpinlock::WriteGuard guard(segment_lock_);
+    auto desc_it = segment_id_to_desc_map_.find(segment_id);
+    if (desc_it == segment_id_to_desc_map_.end()) {
+        return 0;
+    }
+    for (auto name_it = segment_name_to_id_map_.begin();
+         name_it != segment_name_to_id_map_.end();) {
+        if (name_it->second == segment_id) {
+            name_it = segment_name_to_id_map_.erase(name_it);
+        } else {
+            ++name_it;
+        }
+    }
+    segment_id_to_desc_map_.erase(desc_it);
+    return 0;
+}
+
+int TransferMetadata::removeAllRemoteSegments() {
+    RWSpinlock::WriteGuard guard(segment_lock_);
+    for (auto it = segment_name_to_id_map_.begin();
+         it != segment_name_to_id_map_.end();) {
+        if (it->second == LOCAL_SEGMENT_ID) {
+            ++it;
+            continue;
+        }
+        segment_id_to_desc_map_.erase(it->second);
+        it = segment_name_to_id_map_.erase(it);
+    }
+    return 0;
+}
+
 int TransferMetadata::addLocalMemoryBuffer(const BufferDesc &buffer_desc,
                                            bool update_metadata) {
     {

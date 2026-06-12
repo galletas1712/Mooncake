@@ -97,6 +97,7 @@ struct graph_stable_checkpoint_options {
     int preserve_local_va;
     const char *fresh_bootstrap;
     const char *fresh_metadata;
+    uint64_t drain_timeout_ms;
 };
 
 typedef struct graph_stable_checkpoint_options graph_stable_checkpoint_options_t;

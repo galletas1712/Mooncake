@@ -89,6 +89,9 @@ class Buffer:
         from mooncake import ep
 
         if not self._use_fallback:
+            if is_update:
+                self.runtime.update_local_qpns()
+
             (raddr, rkey) = self.runtime.get_mr_info()
 
             raddr = torch.tensor([raddr], dtype=torch.int64, device="cuda")
@@ -108,9 +111,6 @@ class Buffer:
             rkeys = torch.cat(rkeys).tolist()
 
             all_to_all_size = ep.MAX_QP_COUNT // self.group_size
-
-            if is_update:
-                self.runtime.update_local_qpns()
 
             local_qpns = self.runtime.get_local_qpns()
             local_qpns = list(
